@@ -2,11 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """JAX TVM FFI Python package."""
 
+import importlib
 import sys
+import threading
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+import jax
 import jax.ffi
+import jax.numpy as jnp
 import tvm_ffi
 
 
@@ -32,6 +38,22 @@ def _load_lib() -> tvm_ffi.Module:
 
 _LIB = _load_lib()
 
+_PAYLOAD_TARGET = "jax_tvm_ffi.payload_call"
+_ORCJIT_PAYLOAD_LOADER = "tvm_ffi_orcjit"
+_payload_registration_lock = threading.Lock()
+_registered_payload_targets: set[str] = set()
+
+
+@dataclass(frozen=True)
+class Workspace:
+    """A hidden device buffer passed to a payload function as an opaque pointer."""
+
+    size_in_bytes: int
+
+    def __post_init__(self) -> None:
+        if self.size_in_bytes <= 0:
+            raise ValueError("Workspace size_in_bytes must be positive")
+
 
 def _get_dl_device_type(platform: str) -> int:
     """Get the dl device type from the platform."""
@@ -41,6 +63,148 @@ def _get_dl_device_type(platform: str) -> int:
         return tvm_ffi.DLDeviceType.kDLCUDA
     else:
         raise ValueError(f"Unsupported platform: {platform}")
+
+
+def _register_payload_target(platform: str) -> str:
+    target = _PAYLOAD_TARGET
+    with _payload_registration_lock:
+        if platform in _registered_payload_targets:
+            return target
+
+        jax.ffi.register_ffi_target(
+            target,
+            {
+                "prepare": jax.ffi.pycapsule(_LIB.payload_call_prepare_handler()),
+                "execute": jax.ffi.pycapsule(_LIB.payload_call_execute_handler()),
+            },
+            platform=platform,
+        )
+        _registered_payload_targets.add(platform)
+    return target
+
+
+def ffi_call_from_payload(
+    payload: bytes,
+    payload_loader: str,
+    function_name: str,
+    result_shape_dtypes: Any,
+    *,
+    platform: str = "gpu",
+    workspaces: Sequence[Workspace] = (),
+    vmap_method: str | None = None,
+    input_layouts: Sequence[Any] | None = None,
+    output_layouts: Sequence[Any] | None = None,
+    input_output_aliases: dict[int, int] | None = None,
+) -> Callable[..., Any]:
+    """Build a JAX FFI call whose executable owns its compiled payload.
+
+    ``payload_loader`` names a registered TVM global function with signature
+    ``(Bytes, String) -> Function``. It is called during executable preparation
+    when supported, or on the first execution otherwise. The returned function
+    is cached by payload identity; the custom-call target itself is shared by
+    every payload-backed call.
+
+    Workspace buffers are appended to the custom call outputs, hidden from the
+    returned JAX value, and passed to the loaded function as opaque pointers
+    after its ordinary tensor arguments and results.
+    """
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError("payload must be nonempty bytes")
+    if not payload_loader:
+        raise ValueError("payload_loader must be nonempty")
+    if not function_name:
+        raise ValueError("function_name must be nonempty")
+    if output_layouts is not None and len(output_layouts) != len(
+        jax.tree.leaves(result_shape_dtypes)
+    ):
+        raise ValueError("output_layouts must describe only the visible results")
+
+    target = _register_payload_target(platform)
+    result_leaves, result_tree = jax.tree.flatten(result_shape_dtypes)
+    workspace_results = tuple(
+        jax.ShapeDtypeStruct((workspace.size_in_bytes,), jnp.uint8) for workspace in workspaces
+    )
+    all_results = (*result_leaves, *workspace_results)
+    all_output_layouts = None
+    if output_layouts is not None:
+        all_output_layouts = (*output_layouts, *((0,) for _ in workspaces))
+
+    call = jax.ffi.ffi_call(
+        target,
+        all_results,
+        vmap_method=vmap_method,
+        input_layouts=input_layouts,
+        output_layouts=all_output_layouts,
+        input_output_aliases=input_output_aliases,
+    )
+
+    def wrapped(*args: Any) -> Any:
+        results = call(
+            *args,
+            payload=payload,
+            payload_loader=payload_loader,
+            function_name=function_name,
+            device_type=int(_get_dl_device_type(platform)),
+            num_workspace_outputs=len(workspaces),
+        )
+        visible_results = tuple(results[: len(result_leaves)])
+        return jax.tree.unflatten(result_tree, visible_results)
+
+    return wrapped
+
+
+def ffi_call_from_object(
+    object_bytes: bytes,
+    function_name: str,
+    result_shape_dtypes: Any,
+    *,
+    platform: str = "gpu",
+    workspaces: Sequence[Workspace] = (),
+    vmap_method: str | None = None,
+    input_layouts: Sequence[Any] | None = None,
+    output_layouts: Sequence[Any] | None = None,
+    input_output_aliases: dict[int, int] | None = None,
+) -> Callable[..., Any]:
+    """Build a JAX FFI call backed by an in-memory native object file.
+
+    The object bytes are serialized into the StableHLO custom call. At executable
+    preparation, TVM-FFI ORCJIT loads the object directly from memory and resolves
+    ``function_name`` as a TVM FFI export.
+    """
+    try:
+        importlib.import_module("tvm_ffi_orcjit")
+    except ImportError as error:
+        raise ImportError(
+            "ffi_call_from_object requires apache-tvm-ffi-orcjit; install jax-tvm-ffi[orcjit]"
+        ) from error
+
+    required_globals = (
+        "tvm_ffi_orcjit.GlobalDefaultSession",
+        "tvm_ffi_orcjit.SessionLoadModule",
+    )
+    missing_globals = [
+        name
+        for name in required_globals
+        if tvm_ffi.get_global_func(name, allow_missing=True) is None
+    ]
+    if missing_globals:
+        raise RuntimeError(
+            "The installed apache-tvm-ffi-orcjit does not support in-memory module loading; "
+            f"missing {', '.join(missing_globals)}"
+        )
+
+    return ffi_call_from_payload(
+        object_bytes,
+        _ORCJIT_PAYLOAD_LOADER,
+        function_name,
+        result_shape_dtypes,
+        platform=platform,
+        workspaces=workspaces,
+        vmap_method=vmap_method,
+        input_layouts=input_layouts,
+        output_layouts=output_layouts,
+        input_output_aliases=input_output_aliases,
+    )
 
 
 def register_ffi_target(

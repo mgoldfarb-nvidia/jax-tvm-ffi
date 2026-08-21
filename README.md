@@ -91,6 +91,37 @@ jax_tvm_ffi.register_ffi_target(
 result = jax.ffi.ffi_call("my.function", output_shape)(x, y, eps=1e-5)
 ```
 
+### Object-backed calls
+
+Install the optional ORCJIT loader with `pip install jax-tvm-ffi[orcjit]`.
+`ffi_call_from_object` embeds a native relocatable object and entry-point name
+in the StableHLO custom call. At executable preparation, a shared TVM-FFI
+ORCJIT session loads the object directly from the serialized bytes and resolves
+the exported host launcher.
+
+```python
+call = jax_tvm_ffi.ffi_call_from_object(
+    object_artifact.get_data(),
+    "launch_kernel",
+    jax.ShapeDtypeStruct(output_shape, jnp.float32),
+    platform="gpu",
+    workspaces=(jax_tvm_ffi.Workspace(workspace_size),),
+)
+result = jax.jit(call)(input)
+```
+
+The object should contain the TVM-FFI host export and any embedded device code,
+such as a CUBIN. On Linux this is an ELF relocatable object; ORCJIT also accepts
+the native object format on macOS and Windows. `ffi_call_from_payload` remains
+available for other serialized formats through a registered loader with
+signature `(Bytes, String) -> Function`.
+
+Workspaces are trailing `uint8` outputs owned by XLA. They are hidden from the
+Python result and passed to the loaded function as opaque pointers after its
+ordinary input and output tensors. This is separate from
+`use_last_output_for_alloc_workspace`, which provides TVM FFI's allocation
+arena and does not pass the arena itself to the function.
+
 ### Python Callback
 
 Because `tvm_ffi` supports Python functions out of the box, you can use the same
