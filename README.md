@@ -93,21 +93,35 @@ result = jax.ffi.ffi_call("my.function", output_shape)(x, y, eps=1e-5)
 
 ### Object-backed calls
 
-Install the optional ORCJIT loader with `pip install jax-tvm-ffi[orcjit]`.
+Install the optional ORCJIT 0.1.1+ loader with `pip install jax-tvm-ffi[orcjit]`.
 `ffi_call_from_object` embeds a native relocatable object and entry-point name
-in the StableHLO custom call. At executable preparation, a shared TVM-FFI
+in the StableHLO custom call. At executable instantiation, a shared TVM-FFI
 ORCJIT session loads the object directly from the serialized bytes and resolves
-the exported host launcher.
+the exported host launcher. The resolved function and decoded argument mapping
+are then owned by the executable and reused by every launch.
+
+CUTLASS DSL users can obtain the object bytes, exported name, and SHA-256
+digest with `jax_tvm_ffi.cutlass.compile_to_object`. Object compilation uses a
+bounded in-process cache keyed by precompiled artifact, target, and lowering
+options; pass `no_cache=True` to force recompilation.
 
 ```python
+from jax_tvm_ffi.cutlass import compile_to_object
+
+serialized_function = compile_to_object(
+    kernel,
+    *compile_args,
+    compile_options={"preserve-line-info": "true"},
+)
 call = jax_tvm_ffi.ffi_call_from_object(
-    object_artifact.get_data(),
-    "launch_kernel",
+    serialized_function.object_bytes,
+    serialized_function.function_name,
     jax.ShapeDtypeStruct(output_shape, jnp.float32),
     platform="gpu",
+    arg_spec=("args", "rets", "attrs.scale"),
     workspaces=(jax_tvm_ffi.Workspace(workspace_size),),
 )
-result = jax.jit(call)(input)
+result = jax.jit(lambda x: call(x, scale=scale))(input)
 ```
 
 The object should contain the TVM-FFI host export and any embedded device code,

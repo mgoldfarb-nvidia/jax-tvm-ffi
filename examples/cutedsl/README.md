@@ -26,6 +26,27 @@ pip install jax-tvm-ffi nvidia-cutlass-dsl
 python -m examples.cutedsl.jax_softmax
 ```
 
+To embed the compiled native objects in StableHLO instead of registering live
+TVM FFI function handles, install the ORCJIT 0.1.1+ extra and run the serialized version:
+
+```bash
+pip install "jax-tvm-ffi[cutedsl,orcjit]"
+python -m examples.cutedsl.jax_softmax_serialized
+```
+
+The serialized example uses the CuTe DSL artifact compiler to produce a
+`SerializedFunction` containing the TVM FFI object bytes, exported function
+name, and SHA-256 digest. It embeds the bytes and name in the HLO without writing
+an object file. The installed ORCJIT extension must provide its in-memory
+`LoadObjectFunction` API. The reusable
+compiler entry point is `jax_tvm_ffi.cutlass.compile_to_object`; it currently
+relies on CuTe DSL's experimental fine-grained compilation API.
+Pass a `compile_options` key/value mapping to override lowering options accepted
+by `CuteCompiler.add_compile_option`; the TVM FFI ABI remains mandatory.
+Identical artifacts are reused from a process-local compiled-object cache. Pass
+`no_cache=True` to force recompilation, including when compiler options are used
+for diagnostic output or other side effects.
+
 ## Usage
 
 ```python
@@ -68,3 +89,4 @@ if len(devices) >= 2:
 |------|-------------|
 | `softmax.py` | CuTeDSL kernel implementations (forward + backward) |
 | `jax_softmax.py` | JAX integration of the softmax kernel |
+| `jax_softmax_serialized.py` | JAX integration with object bytes embedded in StableHLO |
