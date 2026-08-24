@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """JAX TVM FFI Python package."""
 
+import hashlib
 import importlib
 import sys
 import threading
@@ -39,7 +40,7 @@ def _load_lib() -> tvm_ffi.Module:
 _LIB = _load_lib()
 
 _PAYLOAD_TARGET = "jax_tvm_ffi.payload_call"
-_ORCJIT_PAYLOAD_LOADER = "tvm_ffi_orcjit.LoadObjectFunction"
+_ORCJIT_PAYLOAD_LOADER = "tvm_ffi_orcjit.LoadObjectModule"
 _PAYLOAD_INTERNAL_ATTRS = frozenset(
     {
         "arg_spec",
@@ -48,6 +49,7 @@ _PAYLOAD_INTERNAL_ATTRS = frozenset(
         "num_workspace_outputs",
         "payload",
         "payload_loader",
+        "payload_sha256",
     }
 )
 _payload_registration_lock = threading.Lock()
@@ -63,6 +65,16 @@ class Workspace:
     def __post_init__(self) -> None:
         if self.size_in_bytes <= 0:
             raise ValueError("Workspace size_in_bytes must be positive")
+
+
+def clear_payload_module_cache() -> int:
+    """Release modules retained only by the process-wide payload cache.
+
+    Returns the number of loaded modules removed. Modules referenced by live JAX
+    executables remain valid until those executables are destroyed. Loads already
+    in progress are not counted and cannot repopulate the cleared cache.
+    """
+    return int(_LIB.clear_payload_module_cache())
 
 
 def _get_dl_device_type(platform: str) -> int:
@@ -143,10 +155,10 @@ def ffi_call_from_payload(  # noqa: PLR0913
     """Build a JAX FFI call whose executable owns its compiled payload.
 
     ``payload_loader`` names a registered TVM global function with signature
-    ``(Bytes, String) -> Function``. It is called once when an executable is
-    instantiated. The returned function and decoded argument specification are
-    owned by that executable; the custom-call target itself is shared by every
-    payload-backed call.
+    ``(Bytes) -> Module``. Modules are content-cached by loader and payload
+    SHA-256, then ``function_name`` is resolved from the cached module when an
+    executable is instantiated. The module, resolved function, and decoded
+    argument specification are owned by that executable.
 
     ``arg_spec`` uses the same ``args``, ``rets``, ``attrs.<key>``, and
     ``ctx.stream`` entries as :func:`register_ffi_target`. Keyword arguments to
@@ -166,6 +178,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
         jax.tree.leaves(result_shape_dtypes)
     ):
         raise ValueError("output_layouts must describe only the visible results")
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
     encoded_arg_spec, expected_attr_names = _encode_arg_spec(arg_spec)
 
     target = _register_payload_target(platform)
@@ -200,6 +213,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
             arg_spec=encoded_arg_spec,
             payload=payload,
             payload_loader=payload_loader,
+            payload_sha256=payload_sha256,
             function_name=function_name,
             device_type=int(_get_dl_device_type(platform)),
             num_workspace_outputs=len(workspaces),
@@ -226,8 +240,8 @@ def ffi_call_from_object(
     """Build a JAX FFI call backed by an in-memory native object file.
 
     The object bytes are serialized into the StableHLO custom call. At executable
-    instantiation, TVM-FFI ORCJIT loads the object directly from memory and resolves
-    ``function_name`` as a TVM FFI export.
+    instantiation, TVM-FFI ORCJIT loads the object directly from memory. JAX TVM
+    FFI caches the module by object SHA-256 and resolves ``function_name`` from it.
     """
     try:
         importlib.import_module("tvm_ffi_orcjit")
@@ -238,7 +252,7 @@ def ffi_call_from_object(
 
     if tvm_ffi.get_global_func(_ORCJIT_PAYLOAD_LOADER, allow_missing=True) is None:
         raise RuntimeError(
-            "The installed apache-tvm-ffi-orcjit does not support loading functions from "
+            "The installed apache-tvm-ffi-orcjit does not support loading modules from "
             "serialized object bytes"
         )
 

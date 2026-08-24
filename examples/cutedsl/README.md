@@ -38,7 +38,8 @@ The serialized example uses the CuTe DSL artifact compiler to produce a
 `SerializedFunction` containing the TVM FFI object bytes, exported function
 name, and SHA-256 digest. It embeds the bytes and name in the HLO without writing
 an object file. The installed ORCJIT extension must provide its in-memory
-`LoadObjectFunction` API. The reusable
+`LoadObjectModule` API. JAX TVM FFI caches the loaded module by object SHA-256
+and resolves each requested function from it. The reusable
 compiler entry point is `jax_tvm_ffi.cutlass.compile_to_object`; it currently
 relies on CuTe DSL's experimental fine-grained compilation API.
 Pass a `compile_options` key/value mapping to override lowering options accepted

@@ -93,12 +93,16 @@ result = jax.ffi.ffi_call("my.function", output_shape)(x, y, eps=1e-5)
 
 ### Object-backed calls
 
-Install the optional ORCJIT 0.1.1+ loader with `pip install jax-tvm-ffi[orcjit]`.
+Install the optional ORCJIT 0.1.1+ loader with `pip install jax-tvm-ffi[orcjit]`
+once that wheel is published. Until then, use `uv sync --extra orcjit`; this
+repository pins the coordinated
+[ORCJIT fork revision](https://github.com/mgoldfarb-nvidia/tvm-ffi/commit/4a424c81f8d4d6edcf2c0bc5aa77d4e5e5eb028d).
 `ffi_call_from_object` embeds a native relocatable object and entry-point name
 in the StableHLO custom call. At executable instantiation, a shared TVM-FFI
-ORCJIT session loads the object directly from the serialized bytes and resolves
-the exported host launcher. The resolved function and decoded argument mapping
-are then owned by the executable and reused by every launch.
+ORCJIT session loads the object directly from the serialized bytes. JAX TVM FFI
+content-caches the resulting module by loader and payload SHA-256, then resolves
+the exported host launcher from that module. The module, resolved function, and
+decoded argument mapping are owned by each executable and reused by every launch.
 
 CUTLASS DSL users can obtain the object bytes, exported name, and SHA-256
 digest with `jax_tvm_ffi.cutlass.compile_to_object`. Object compilation uses a
@@ -128,7 +132,9 @@ The object should contain the TVM-FFI host export and any embedded device code,
 such as a CUBIN. On Linux this is an ELF relocatable object; ORCJIT also accepts
 the native object format on macOS and Windows. `ffi_call_from_payload` remains
 available for other serialized formats through a registered loader with
-signature `(Bytes, String) -> Function`.
+signature `(Bytes) -> Module`. Call `clear_payload_module_cache()` to release
+modules retained only by the bounded process-wide cache; live executables keep
+their modules valid.
 
 Workspaces are trailing `uint8` outputs owned by XLA. They are hidden from the
 Python result and passed to the loaded function as opaque pointers after its

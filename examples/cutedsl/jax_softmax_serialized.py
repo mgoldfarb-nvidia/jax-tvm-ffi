@@ -4,8 +4,8 @@
 
 Unlike ``jax_softmax``, this example does not keep a process-global TVM FFI
 function registration. It compiles each function to an in-memory object artifact
-and embeds those bytes in the StableHLO custom call. ORCJIT loads the object and
-resolves its TVM FFI export once for each XLA executable.
+and embeds those bytes in the StableHLO custom call. JAX TVM FFI caches each
+ORCJIT module by object SHA-256 and resolves its TVM FFI exports from that module.
 
 Usage:
     python -m examples.cutedsl.jax_softmax_serialized

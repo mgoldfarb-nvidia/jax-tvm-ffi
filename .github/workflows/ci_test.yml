@@ -77,7 +77,7 @@ jobs:
           CMAKE_BUILD_PARALLEL_LEVEL: ${{ steps.env_vars.outputs.cpu_count }}
           UV_CONSTRAINT: .github/workflows/constraints.txt
         run: |
-          uv pip install pytest numpy
+          uv pip install pytest numpy "apache-tvm-ffi[cpp]>=0.1.8.post2"
           uv pip install --reinstall --verbose .
 
       # Run Python tests
