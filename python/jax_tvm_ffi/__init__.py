@@ -39,7 +39,17 @@ def _load_lib() -> tvm_ffi.Module:
 _LIB = _load_lib()
 
 _PAYLOAD_TARGET = "jax_tvm_ffi.payload_call"
-_ORCJIT_PAYLOAD_LOADER = "tvm_ffi_orcjit"
+_ORCJIT_PAYLOAD_LOADER = "tvm_ffi_orcjit.LoadObjectFunction"
+_PAYLOAD_INTERNAL_ATTRS = frozenset(
+    {
+        "arg_spec",
+        "device_type",
+        "function_name",
+        "num_workspace_outputs",
+        "payload",
+        "payload_loader",
+    }
+)
 _payload_registration_lock = threading.Lock()
 _registered_payload_targets: set[str] = set()
 
@@ -71,11 +81,22 @@ def _register_payload_target(platform: str) -> str:
         if platform in _registered_payload_targets:
             return target
 
+        device_type = int(_get_dl_device_type(platform))
+        jax.ffi.register_ffi_type(
+            f"jax_tvm_ffi.payload_call_state.{platform}",
+            {
+                "type_id": jax.ffi.pycapsule(_LIB.payload_call_state_type_id(device_type)),
+                "type_info": jax.ffi.pycapsule(_LIB.payload_call_state_type_info(device_type)),
+            },
+            platform=platform,
+        )
         jax.ffi.register_ffi_target(
             target,
             {
-                "prepare": jax.ffi.pycapsule(_LIB.payload_call_prepare_handler()),
-                "execute": jax.ffi.pycapsule(_LIB.payload_call_execute_handler()),
+                "instantiate": jax.ffi.pycapsule(
+                    _LIB.payload_call_instantiate_handler(device_type)
+                ),
+                "execute": jax.ffi.pycapsule(_LIB.payload_call_execute_handler(device_type)),
             },
             platform=platform,
         )
@@ -83,13 +104,36 @@ def _register_payload_target(platform: str) -> str:
     return target
 
 
-def ffi_call_from_payload(
+def _encode_arg_spec(arg_spec: Sequence[str] | None) -> tuple[str, frozenset[str]]:
+    items = tuple(arg_spec) if arg_spec is not None else ("args", "rets")
+    attr_names = set()
+    for item in items:
+        if not isinstance(item, str) or not item:
+            raise ValueError("arg_spec items must be nonempty strings")
+        if "\0" in item:
+            raise ValueError("arg_spec items cannot contain null characters")
+        if item in ("args", "rets", "ctx.stream"):
+            continue
+        if not item.startswith("attrs.") or len(item) == len("attrs."):
+            raise ValueError(
+                f"Invalid arg spec {item!r}; expected 'args', 'rets', 'ctx.stream', "
+                "or 'attrs.<key>'"
+            )
+        attr_name = item.removeprefix("attrs.")
+        if attr_name in _PAYLOAD_INTERNAL_ATTRS:
+            raise ValueError(f"arg_spec attribute {attr_name!r} is reserved")
+        attr_names.add(attr_name)
+    return "\0".join(items), frozenset(attr_names)
+
+
+def ffi_call_from_payload(  # noqa: PLR0913
     payload: bytes,
     payload_loader: str,
     function_name: str,
     result_shape_dtypes: Any,
     *,
     platform: str = "gpu",
+    arg_spec: Sequence[str] | None = None,
     workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
     input_layouts: Sequence[Any] | None = None,
@@ -99,10 +143,14 @@ def ffi_call_from_payload(
     """Build a JAX FFI call whose executable owns its compiled payload.
 
     ``payload_loader`` names a registered TVM global function with signature
-    ``(Bytes, String) -> Function``. It is called during executable preparation
-    when supported, or on the first execution otherwise. The returned function
-    is cached by payload identity; the custom-call target itself is shared by
-    every payload-backed call.
+    ``(Bytes, String) -> Function``. It is called once when an executable is
+    instantiated. The returned function and decoded argument specification are
+    owned by that executable; the custom-call target itself is shared by every
+    payload-backed call.
+
+    ``arg_spec`` uses the same ``args``, ``rets``, ``attrs.<key>``, and
+    ``ctx.stream`` entries as :func:`register_ffi_target`. Keyword arguments to
+    the returned callable must exactly match its ``attrs.<key>`` entries.
 
     Workspace buffers are appended to the custom call outputs, hidden from the
     returned JAX value, and passed to the loaded function as opaque pointers
@@ -118,6 +166,7 @@ def ffi_call_from_payload(
         jax.tree.leaves(result_shape_dtypes)
     ):
         raise ValueError("output_layouts must describe only the visible results")
+    encoded_arg_spec, expected_attr_names = _encode_arg_spec(arg_spec)
 
     target = _register_payload_target(platform)
     result_leaves, result_tree = jax.tree.flatten(result_shape_dtypes)
@@ -138,9 +187,17 @@ def ffi_call_from_payload(
         input_output_aliases=input_output_aliases,
     )
 
-    def wrapped(*args: Any) -> Any:
+    def wrapped(*args: Any, **attrs: Any) -> Any:
+        if attrs.keys() != expected_attr_names:
+            missing = sorted(expected_attr_names - attrs.keys())
+            unexpected = sorted(attrs.keys() - expected_attr_names)
+            raise ValueError(
+                f"FFI attributes do not match arg_spec; missing={missing}, unexpected={unexpected}"
+            )
         results = call(
             *args,
+            **attrs,
+            arg_spec=encoded_arg_spec,
             payload=payload,
             payload_loader=payload_loader,
             function_name=function_name,
@@ -159,6 +216,7 @@ def ffi_call_from_object(
     result_shape_dtypes: Any,
     *,
     platform: str = "gpu",
+    arg_spec: Sequence[str] | None = None,
     workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
     input_layouts: Sequence[Any] | None = None,
@@ -168,7 +226,7 @@ def ffi_call_from_object(
     """Build a JAX FFI call backed by an in-memory native object file.
 
     The object bytes are serialized into the StableHLO custom call. At executable
-    preparation, TVM-FFI ORCJIT loads the object directly from memory and resolves
+    instantiation, TVM-FFI ORCJIT loads the object directly from memory and resolves
     ``function_name`` as a TVM FFI export.
     """
     try:
@@ -178,19 +236,10 @@ def ffi_call_from_object(
             "ffi_call_from_object requires apache-tvm-ffi-orcjit; install jax-tvm-ffi[orcjit]"
         ) from error
 
-    required_globals = (
-        "tvm_ffi_orcjit.GlobalDefaultSession",
-        "tvm_ffi_orcjit.SessionLoadModule",
-    )
-    missing_globals = [
-        name
-        for name in required_globals
-        if tvm_ffi.get_global_func(name, allow_missing=True) is None
-    ]
-    if missing_globals:
+    if tvm_ffi.get_global_func(_ORCJIT_PAYLOAD_LOADER, allow_missing=True) is None:
         raise RuntimeError(
-            "The installed apache-tvm-ffi-orcjit does not support in-memory module loading; "
-            f"missing {', '.join(missing_globals)}"
+            "The installed apache-tvm-ffi-orcjit does not support loading functions from "
+            "serialized object bytes"
         )
 
     return ffi_call_from_payload(
@@ -199,6 +248,7 @@ def ffi_call_from_object(
         function_name,
         result_shape_dtypes,
         platform=platform,
+        arg_spec=arg_spec,
         workspaces=workspaces,
         vmap_method=vmap_method,
         input_layouts=input_layouts,
