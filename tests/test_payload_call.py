@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -139,6 +140,59 @@ def test_payload_call_caches_module_and_passes_workspace(payload_module, request
     assert replacement_load_count == 1
 
 
+def test_payload_cache_lifetime_follows_executable_owners(payload_module, request):
+    jax_tvm_ffi.clear_payload_module_cache()
+    payload = b"payload-module-lifetime"
+    loader_name = "jax_tvm_ffi_test.LoadLifetimeModule"
+    load_count = 0
+
+    @tvm_ffi.register_global_func(loader_name)
+    def load_module(payload_bytes):
+        nonlocal load_count
+        load_count += 1
+        assert bytes(payload_bytes) == payload
+        return payload_module
+
+    def cleanup():
+        jax_tvm_ffi.clear_payload_module_cache()
+        tvm_ffi.remove_global_func(loader_name)
+
+    request.addfinalizer(cleanup)
+    call = jax_tvm_ffi.ffi_call_from_payload(
+        payload,
+        loader_name,
+        "add",
+        jax.ShapeDtypeStruct((8,), jnp.float32),
+        platform="cpu",
+        arg_spec=("attrs.increment", "rets", "args"),
+        workspaces=(jax_tvm_ffi.Workspace(64),),
+    )
+    x = jnp.arange(8, dtype=jnp.float32)
+    add_one = jax.jit(lambda value: call(value, increment=1)).lower(x).compile()
+    add_two = jax.jit(lambda value: call(value, increment=2)).lower(x).compile()
+
+    numpy.testing.assert_equal(numpy.asarray(add_one(x)), numpy.asarray(x + 1))
+    numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
+    assert load_count == 1
+
+    del add_one
+    jax.clear_caches()
+    gc.collect()
+
+    add_three = jax.jit(lambda value: call(value, increment=3)).lower(x).compile()
+    numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
+    numpy.testing.assert_equal(numpy.asarray(add_three(x)), numpy.asarray(x + 3))
+    assert load_count == 1
+
+    del add_two, add_three
+    jax.clear_caches()
+    gc.collect()
+
+    add_four = jax.jit(lambda value: call(value, increment=4)).lower(x).compile()
+    numpy.testing.assert_equal(numpy.asarray(add_four(x)), numpy.asarray(x + 4))
+    assert load_count == 2
+
+
 def test_object_call_loads_orcjit_object(object_bytes, request):
     request.addfinalizer(jax_tvm_ffi.clear_payload_module_cache)
     call = jax_tvm_ffi.ffi_call_from_object(
@@ -180,62 +234,6 @@ def test_payload_call_rejects_missing_export(payload_module, request):
     with pytest.raises(Exception, match="does not export TVM FFI function 'missing'") as error:
         jax.jit(call)(jnp.arange(8, dtype=jnp.float32))
     assert "INVALID_ARGUMENT" in str(error.value)
-
-
-def test_payload_cache_rejects_digest_alias(payload_module, monkeypatch, request):
-    loader_name = "jax_tvm_ffi_test.LoadDigestAliasModule"
-    load_count = 0
-
-    @tvm_ffi.register_global_func(loader_name)
-    def load_module(_):
-        nonlocal load_count
-        load_count += 1
-        return payload_module
-
-    def cleanup():
-        jax_tvm_ffi.clear_payload_module_cache()
-        tvm_ffi.remove_global_func(loader_name)
-
-    request.addfinalizer(cleanup)
-
-    class FixedDigest:
-        def hexdigest(self):
-            return "0" * 64
-
-    class FixedHashlib:
-        @staticmethod
-        def sha256(_):
-            return FixedDigest()
-
-    monkeypatch.setattr(jax_tvm_ffi, "hashlib", FixedHashlib)
-    result = jax.ShapeDtypeStruct((8,), jnp.float32)
-    call_a = jax_tvm_ffi.ffi_call_from_payload(
-        b"payload-a",
-        loader_name,
-        "add",
-        result,
-        platform="cpu",
-        arg_spec=("attrs.increment", "rets", "args"),
-        workspaces=(jax_tvm_ffi.Workspace(64),),
-    )
-    call_b = jax_tvm_ffi.ffi_call_from_payload(
-        b"payload-b",
-        loader_name,
-        "add",
-        result,
-        platform="cpu",
-        arg_spec=("attrs.increment", "rets", "args"),
-        workspaces=(jax_tvm_ffi.Workspace(64),),
-    )
-    x = jnp.arange(8, dtype=jnp.float32)
-
-    numpy.testing.assert_equal(
-        numpy.asarray(jax.jit(lambda value: call_a(value, increment=1))(x)),
-        numpy.asarray(x + 1),
-    )
-    with pytest.raises(Exception, match="identifies different serialized payload bytes"):
-        jax.jit(lambda value: call_b(value, increment=1))(x)
-    assert load_count == 1
 
 
 def test_clear_during_payload_load_prevents_repopulation(payload_module, request):

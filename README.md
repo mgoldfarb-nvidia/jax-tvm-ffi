@@ -100,9 +100,11 @@ repository pins the coordinated
 `ffi_call_from_object` embeds a native relocatable object and entry-point name
 in the StableHLO custom call. At executable instantiation, a shared TVM-FFI
 ORCJIT session loads the object directly from the serialized bytes. JAX TVM FFI
-content-caches the resulting module by loader and payload SHA-256, then resolves
-the exported host launcher from that module. The module, resolved function, and
-decoded argument mapping are owned by each executable and reused by every launch.
+weakly interns the resulting module by loader and payload SHA-256, then resolves
+the exported host launcher from that module. Each executable strongly owns the
+shared module, resolved function, and decoded argument mapping for every launch.
+The cache does not extend module lifetime, so a module can unload after its last
+executable and in-flight instantiation owner is destroyed.
 
 CUTLASS DSL users can obtain the object bytes, exported name, and SHA-256
 digest with `jax_tvm_ffi.cutlass.compile_to_object`. Object compilation uses a
@@ -132,9 +134,8 @@ The object should contain the TVM-FFI host export and any embedded device code,
 such as a CUBIN. On Linux this is an ELF relocatable object; ORCJIT also accepts
 the native object format on macOS and Windows. `ffi_call_from_payload` remains
 available for other serialized formats through a registered loader with
-signature `(Bytes) -> Module`. Call `clear_payload_module_cache()` to release
-modules retained only by the bounded process-wide cache; live executables keep
-their modules valid.
+signature `(Bytes) -> Module`. Call `clear_payload_module_cache()` to invalidate
+weak lookup entries; live executables keep their modules valid.
 
 Workspaces are trailing `uint8` outputs owned by XLA. They are hidden from the
 Python result and passed to the loaded function as opaque pointers after its

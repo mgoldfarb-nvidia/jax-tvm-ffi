@@ -78,11 +78,11 @@ class Workspace:
 
 
 def clear_payload_module_cache() -> int:
-    """Release modules retained only by the process-wide payload cache.
+    """Invalidate process-wide payload-module lookup entries.
 
-    Returns the number of loaded modules removed. Modules referenced by live JAX
-    executables remain valid until those executables are destroyed. Loads already
-    in progress are not counted and cannot repopulate the cleared cache.
+    Returns the number of reusable live lookup entries invalidated. The cache
+    holds modules weakly, so module lifetime follows live JAX executables. Loads
+    already in progress are not counted and cannot repopulate the cleared cache.
     """
     return int(_LIB.clear_payload_module_cache())
 
@@ -165,8 +165,8 @@ def ffi_call_from_payload(  # noqa: PLR0913
     """Build a JAX FFI call whose executable owns its compiled payload.
 
     ``payload_loader`` names a registered TVM global function with signature
-    ``(Bytes) -> Module``. Modules are content-cached by loader and payload
-    SHA-256, then ``function_name`` is resolved from the cached module when an
+    ``(Bytes) -> Module``. Modules are weakly interned by loader and payload
+    SHA-256, then ``function_name`` is resolved from the shared module when an
     executable is instantiated. The module, resolved function, and decoded
     argument specification are owned by that executable.
 
@@ -251,7 +251,7 @@ def ffi_call_from_object(
 
     The object bytes are serialized into the StableHLO custom call. At executable
     instantiation, TVM-FFI ORCJIT loads the object directly from memory. JAX TVM
-    FFI caches the module by object SHA-256 and resolves ``function_name`` from it.
+    FFI weakly interns the module by object SHA-256 and resolves ``function_name`` from it.
     """
     try:
         importlib.import_module("tvm_ffi_orcjit")
