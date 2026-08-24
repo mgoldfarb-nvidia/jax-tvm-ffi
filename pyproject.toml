@@ -22,7 +22,7 @@ cutedsl = ["nvidia-cutlass-dsl>=4.6"]
 orcjit = ["apache-tvm-ffi-orcjit>=0.1.1"]
 
 [tool.uv.sources]
-apache-tvm-ffi-orcjit = { git = "https://github.com/mgoldfarb-nvidia/tvm-ffi.git", rev = "4a424c81f8d4d6edcf2c0bc5aa77d4e5e5eb028d", subdirectory = "addons/tvm_ffi_orcjit" }
+apache-tvm-ffi-orcjit = { git = "https://github.com/apache/tvm-ffi.git", rev = "c4a89570a9b361301eded1aff7933f5a7ff2f9f3", subdirectory = "addons/tvm_ffi_orcjit" }
 
 [build-system]
 requires = ["scikit-build-core>=0.10.0", "apache-tvm-ffi>=0.1.8.post2", "jax>=0.8.1"]

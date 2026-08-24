@@ -1095,6 +1095,21 @@ tvm::ffi::Array<tvm::ffi::String> DecodeArgSpec(std::string_view encoded_arg_spe
 
 namespace {
 
+tvm::ffi::Module LoadOrcjitObjectModule(const tvm::ffi::Bytes& object_bytes) {
+  std::optional<tvm::ffi::Function> default_session =
+      tvm::ffi::Function::GetGlobal("tvm_ffi_orcjit.GlobalDefaultSession");
+  std::optional<tvm::ffi::Function> load_module =
+      tvm::ffi::Function::GetGlobal("tvm_ffi_orcjit.SessionLoadModule");
+  if (!default_session.has_value() || !load_module.has_value()) {
+    throw std::invalid_argument(
+        "apache-tvm-ffi-orcjit does not support loading object bytes into a module");
+  }
+
+  tvm::ffi::ObjectRef session = (*default_session)().cast<tvm::ffi::ObjectRef>();
+  tvm::ffi::Array<tvm::ffi::Variant<tvm::ffi::String, tvm::ffi::Bytes>> objects{object_bytes};
+  return (*load_module)(session, objects, tvm::ffi::String()).cast<tvm::ffi::Module>();
+}
+
 struct PayloadModuleKey {
   std::string loader;
   const tvm::ffi::FunctionObj* loader_identity;
@@ -1628,6 +1643,7 @@ size_t GetLastWorkspacePeak() { return WorkspaceAllocatorContext::GetThreadLocal
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(register_tvm_ffi_handler, JAXTVMFFIRegistry::Register);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(registered_count, JAXTVMFFIRegistry::RegisteredCount);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(get_last_workspace_peak, GetLastWorkspacePeak);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(load_orcjit_object_module, LoadOrcjitObjectModule);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_instantiate_handler, PayloadCallInstantiateHandler);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_execute_handler, PayloadCallExecuteHandler);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_state_type_id, PayloadCallStateTypeId);

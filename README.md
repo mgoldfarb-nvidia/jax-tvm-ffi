@@ -96,7 +96,7 @@ result = jax.ffi.ffi_call("my.function", output_shape)(x, y, eps=1e-5)
 Install the optional ORCJIT 0.1.1+ loader with `pip install jax-tvm-ffi[orcjit]`
 once that wheel is published. Until then, use `uv sync --extra orcjit`; this
 repository pins the coordinated
-[ORCJIT fork revision](https://github.com/mgoldfarb-nvidia/tvm-ffi/commit/4a424c81f8d4d6edcf2c0bc5aa77d4e5e5eb028d).
+[upstream ORCJIT revision](https://github.com/apache/tvm-ffi/commit/c4a89570a9b361301eded1aff7933f5a7ff2f9f3).
 `ffi_call_from_object` embeds a native relocatable object and entry-point name
 in the StableHLO custom call. At executable instantiation, a shared TVM-FFI
 ORCJIT session loads the object directly from the serialized bytes. JAX TVM FFI

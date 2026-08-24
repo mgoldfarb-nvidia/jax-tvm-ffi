@@ -40,7 +40,11 @@ def _load_lib() -> tvm_ffi.Module:
 _LIB = _load_lib()
 
 _PAYLOAD_TARGET = "jax_tvm_ffi.payload_call"
-_ORCJIT_PAYLOAD_LOADER = "tvm_ffi_orcjit.LoadObjectModule"
+_ORCJIT_PAYLOAD_LOADER = "jax_tvm_ffi.LoadOrcjitObjectModule"
+_ORCJIT_REQUIRED_GLOBALS = (
+    "tvm_ffi_orcjit.GlobalDefaultSession",
+    "tvm_ffi_orcjit.SessionLoadModule",
+)
 _PAYLOAD_INTERNAL_ATTRS = frozenset(
     {
         "arg_spec",
@@ -54,6 +58,12 @@ _PAYLOAD_INTERNAL_ATTRS = frozenset(
 )
 _payload_registration_lock = threading.Lock()
 _registered_payload_targets: set[str] = set()
+
+tvm_ffi.register_global_func(
+    _ORCJIT_PAYLOAD_LOADER,
+    _LIB.load_orcjit_object_module,
+    override=True,
+)
 
 
 @dataclass(frozen=True)
@@ -250,10 +260,13 @@ def ffi_call_from_object(
             "ffi_call_from_object requires apache-tvm-ffi-orcjit; install jax-tvm-ffi[orcjit]"
         ) from error
 
-    if tvm_ffi.get_global_func(_ORCJIT_PAYLOAD_LOADER, allow_missing=True) is None:
+    if any(
+        tvm_ffi.get_global_func(name, allow_missing=True) is None
+        for name in _ORCJIT_REQUIRED_GLOBALS
+    ):
         raise RuntimeError(
-            "The installed apache-tvm-ffi-orcjit does not support loading modules from "
-            "serialized object bytes"
+            "The installed apache-tvm-ffi-orcjit does not support loading serialized object "
+            "bytes into the default execution session"
         )
 
     return ffi_call_from_payload(
