@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """JAX TVM FFI Python package."""
 
+import base64
 import hashlib
 import importlib
 import sys
 import threading
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -40,7 +41,8 @@ def _load_lib() -> tvm_ffi.Module:
 _LIB = _load_lib()
 
 _PAYLOAD_TARGET = "jax_tvm_ffi.payload_call"
-_ORCJIT_PAYLOAD_LOADER = "jax_tvm_ffi.LoadOrcjitObjectModule"
+_ORCJIT_OBJECT_LOADER = "jax_tvm_ffi.LoadOrcjitObjectModule"
+_ORCJIT_BASE64_OBJECT_LOADER = "jax_tvm_ffi.LoadOrcjitBase64ObjectModule"
 _ORCJIT_REQUIRED_GLOBALS = (
     "tvm_ffi_orcjit.GlobalDefaultSession",
     "tvm_ffi_orcjit.SessionLoadModule",
@@ -60,8 +62,13 @@ _payload_registration_lock = threading.Lock()
 _registered_payload_targets: set[str] = set()
 
 tvm_ffi.register_global_func(
-    _ORCJIT_PAYLOAD_LOADER,
+    _ORCJIT_OBJECT_LOADER,
     _LIB.load_orcjit_object_module,
+    override=True,
+)
+tvm_ffi.register_global_func(
+    _ORCJIT_BASE64_OBJECT_LOADER,
+    _LIB.load_orcjit_base64_object_module,
     override=True,
 )
 
@@ -75,6 +82,22 @@ class Workspace:
     def __post_init__(self) -> None:
         if self.size_in_bytes <= 0:
             raise ValueError("Workspace size_in_bytes must be positive")
+
+
+@dataclass(frozen=True)
+class SerializedFunction:
+    """Native object bytes, exported TVM FFI function name, and object digest."""
+
+    object_bytes: bytes
+    function_name: str
+    sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.object_bytes, bytes) or not self.object_bytes:
+            raise ValueError("object_bytes must be nonempty bytes")
+        if not isinstance(self.function_name, str) or not self.function_name:
+            raise ValueError("function_name must be a nonempty string")
+        object.__setattr__(self, "sha256", hashlib.sha256(self.object_bytes).hexdigest())
 
 
 def clear_payload_module_cache() -> int:
@@ -99,6 +122,15 @@ def _get_dl_device_type(platform: str) -> int:
 
 def _register_payload_target(platform: str) -> str:
     target = _PAYLOAD_TARGET
+    with _payload_registration_lock:
+        if platform in _registered_payload_targets:
+            return target
+
+    # JAX replays queued FFI targets before queued FFI types when a backend is
+    # first created. Initialize it before registering this stateful target so
+    # the type is visible when the handler registration is applied.
+    jax.devices(platform)
+
     with _payload_registration_lock:
         if platform in _registered_payload_targets:
             return target
@@ -148,12 +180,13 @@ def _encode_arg_spec(arg_spec: Sequence[str] | None) -> tuple[str, frozenset[str
     return "\0".join(items), frozenset(attr_names)
 
 
-def ffi_call_from_payload(  # noqa: PLR0913
+def _ffi_call_from_payload(  # noqa: PLR0913
     payload: bytes,
     payload_loader: str,
     function_name: str,
     result_shape_dtypes: Any,
     *,
+    payload_sha256: str,
     platform: str = "gpu",
     arg_spec: Sequence[str] | None = None,
     workspaces: Sequence[Workspace] = (),
@@ -162,22 +195,6 @@ def ffi_call_from_payload(  # noqa: PLR0913
     output_layouts: Sequence[Any] | None = None,
     input_output_aliases: dict[int, int] | None = None,
 ) -> Callable[..., Any]:
-    """Build a JAX FFI call whose executable owns its compiled payload.
-
-    ``payload_loader`` names a registered TVM global function with signature
-    ``(Bytes) -> Module``. Modules are weakly interned by loader and payload
-    SHA-256, then ``function_name`` is resolved from the shared module when an
-    executable is instantiated. The module, resolved function, and decoded
-    argument specification are owned by that executable.
-
-    ``arg_spec`` uses the same ``args``, ``rets``, ``attrs.<key>``, and
-    ``ctx.stream`` entries as :func:`register_ffi_target`. Keyword arguments to
-    the returned callable must exactly match its ``attrs.<key>`` entries.
-
-    Workspace buffers are appended to the custom call outputs, hidden from the
-    returned JAX value, and passed to the loaded function as opaque pointers
-    after its ordinary tensor arguments and results.
-    """
     if not isinstance(payload, bytes) or not payload:
         raise ValueError("payload must be nonempty bytes")
     if not payload_loader:
@@ -188,7 +205,6 @@ def ffi_call_from_payload(  # noqa: PLR0913
         jax.tree.leaves(result_shape_dtypes)
     ):
         raise ValueError("output_layouts must describe only the visible results")
-    payload_sha256 = hashlib.sha256(payload).hexdigest()
     encoded_arg_spec, expected_attr_names = _encode_arg_spec(arg_spec)
 
     target = _register_payload_target(platform)
@@ -234,6 +250,76 @@ def ffi_call_from_payload(  # noqa: PLR0913
     return wrapped
 
 
+def ffi_call_from_payload(  # noqa: PLR0913
+    payload: bytes,
+    payload_loader: str,
+    function_name: str,
+    result_shape_dtypes: Any,
+    *,
+    platform: str = "gpu",
+    arg_spec: Sequence[str] | None = None,
+    workspaces: Sequence[Workspace] = (),
+    vmap_method: str | None = None,
+    input_layouts: Sequence[Any] | None = None,
+    output_layouts: Sequence[Any] | None = None,
+    input_output_aliases: dict[int, int] | None = None,
+) -> Callable[..., Any]:
+    """Build a JAX FFI call whose executable owns its compiled payload.
+
+    ``payload_loader`` names a registered TVM global function with signature
+    ``(Bytes) -> Module``. Modules are weakly interned by loader and payload
+    SHA-256, then ``function_name`` is resolved from the shared module when an
+    executable is instantiated. The module, resolved function, and decoded
+    argument specification are owned by that executable.
+
+    ``arg_spec`` uses the same ``args``, ``rets``, ``attrs.<key>``, and
+    ``ctx.stream`` entries as :func:`register_ffi_target`. Keyword arguments to
+    the returned callable must exactly match its ``attrs.<key>`` entries.
+
+    Workspace buffers are appended to the custom call outputs, hidden from the
+    returned JAX value, and passed to the loaded function as opaque pointers
+    after its ordinary tensor arguments and results.
+
+    Constructing the first payload-backed call for a platform initializes that
+    JAX backend to satisfy state-type registration ordering. Complete distributed
+    initialization and backend configuration before creating the call.
+    """
+    if not isinstance(payload, bytes) or not payload:
+        raise ValueError("payload must be nonempty bytes")
+    return _ffi_call_from_payload(
+        payload,
+        payload_loader,
+        function_name,
+        result_shape_dtypes,
+        payload_sha256=hashlib.sha256(payload).hexdigest(),
+        platform=platform,
+        arg_spec=arg_spec,
+        workspaces=workspaces,
+        vmap_method=vmap_method,
+        input_layouts=input_layouts,
+        output_layouts=output_layouts,
+        input_output_aliases=input_output_aliases,
+    )
+
+
+def _require_orcjit() -> None:
+    try:
+        importlib.import_module("tvm_ffi_orcjit")
+    except ImportError as error:
+        raise ImportError(
+            "Object-backed calls require apache-tvm-ffi-orcjit; install jax-tvm-ffi[orcjit]"
+        ) from error
+
+    if any(
+        tvm_ffi.get_global_func(name, allow_missing=True) is None
+        for name in _ORCJIT_REQUIRED_GLOBALS
+    ):
+        raise RuntimeError(
+            "The installed apache-tvm-ffi-orcjit does not support loading serialized object "
+            "bytes into the default execution session"
+        )
+
+
 def ffi_call_from_object(
     object_bytes: bytes,
     function_name: str,
@@ -249,31 +335,57 @@ def ffi_call_from_object(
 ) -> Callable[..., Any]:
     """Build a JAX FFI call backed by an in-memory native object file.
 
-    The object bytes are serialized into the StableHLO custom call. At executable
-    instantiation, TVM-FFI ORCJIT loads the object directly from memory. JAX TVM
-    FFI weakly interns the module by object SHA-256 and resolves ``function_name`` from it.
+    The object is base64-encoded to reduce PJRT executable expansion for binary
+    attributes. At executable instantiation, the native bridge decodes it and
+    TVM-FFI ORCJIT loads it directly from memory. JAX TVM FFI weakly interns the
+    module by object SHA-256 and resolves ``function_name`` from it.
     """
-    try:
-        importlib.import_module("tvm_ffi_orcjit")
-    except ImportError as error:
-        raise ImportError(
-            "ffi_call_from_object requires apache-tvm-ffi-orcjit; install jax-tvm-ffi[orcjit]"
-        ) from error
-
-    if any(
-        tvm_ffi.get_global_func(name, allow_missing=True) is None
-        for name in _ORCJIT_REQUIRED_GLOBALS
-    ):
-        raise RuntimeError(
-            "The installed apache-tvm-ffi-orcjit does not support loading serialized object "
-            "bytes into the default execution session"
-        )
-
-    return ffi_call_from_payload(
-        object_bytes,
-        _ORCJIT_PAYLOAD_LOADER,
+    _require_orcjit()
+    if not isinstance(object_bytes, bytes) or not object_bytes:
+        raise ValueError("object_bytes must be nonempty bytes")
+    return _ffi_call_from_payload(
+        base64.b64encode(object_bytes),
+        _ORCJIT_BASE64_OBJECT_LOADER,
         function_name,
         result_shape_dtypes,
+        payload_sha256=hashlib.sha256(object_bytes).hexdigest(),
+        platform=platform,
+        arg_spec=arg_spec,
+        workspaces=workspaces,
+        vmap_method=vmap_method,
+        input_layouts=input_layouts,
+        output_layouts=output_layouts,
+        input_output_aliases=input_output_aliases,
+    )
+
+
+def ffi_call_from_serialized(
+    serialized_function: SerializedFunction,
+    result_shape_dtypes: Any,
+    *,
+    platform: str = "gpu",
+    arg_spec: Sequence[str] | None = None,
+    workspaces: Sequence[Workspace] = (),
+    vmap_method: str | None = None,
+    input_layouts: Sequence[Any] | None = None,
+    output_layouts: Sequence[Any] | None = None,
+    input_output_aliases: dict[int, int] | None = None,
+) -> Callable[..., Any]:
+    """Build a JAX FFI call from a prehashed native object.
+
+    This is the preferred launcher for :func:`jax_tvm_ffi.cutlass.compile_to_object`
+    results. It embeds the object in StableHLO like :func:`ffi_call_from_object`,
+    while reusing the immutable digest already stored in ``serialized_function``.
+    """
+    if not isinstance(serialized_function, SerializedFunction):
+        raise TypeError("serialized_function must be a SerializedFunction")
+    _require_orcjit()
+    return _ffi_call_from_payload(
+        base64.b64encode(serialized_function.object_bytes),
+        _ORCJIT_BASE64_OBJECT_LOADER,
+        serialized_function.function_name,
+        result_shape_dtypes,
+        payload_sha256=serialized_function.sha256,
         platform=platform,
         arg_spec=arg_spec,
         workspaces=workspaces,

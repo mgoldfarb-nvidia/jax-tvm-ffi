@@ -37,6 +37,9 @@ def fake_cutlass(monkeypatch):
             return types.SimpleNamespace(serialized=state.serialized_artifact)
 
     class CuteCompiler:
+        def set_tvm_ffi_self_initialize_cuda(self, enabled):
+            state.calls.append(("self_initialize_cuda", enabled))
+
         def set_abi(self, abi):
             state.calls.append(("abi", abi))
 
@@ -70,6 +73,14 @@ def fake_cutlass(monkeypatch):
     cute_module = types.ModuleType("cutlass.cute")
     cute_module.compile = CompileCallable()
 
+    runtime_module = types.ModuleType("cutlass.runtime")
+
+    def find_runtime_libraries(*, enable_tvm_ffi):
+        state.calls.append(("find_runtime_libraries", enable_tvm_ffi))
+        return ["/fake/libcute_dsl_runtime.so"]
+
+    runtime_module.find_runtime_libraries = find_runtime_libraries
+
     cutlass_module = types.ModuleType("cutlass")
     cutlass_module.__path__ = []
     cutlass_module.compiler = compiler_module
@@ -79,7 +90,14 @@ def fake_cutlass(monkeypatch):
     monkeypatch.setitem(sys.modules, "cutlass.compiler", compiler_module)
     monkeypatch.setitem(sys.modules, "cutlass.cute", cute_module)
     monkeypatch.setitem(sys.modules, "cutlass.cutlass_dsl", cutlass_dsl_module)
+    monkeypatch.setitem(sys.modules, "cutlass.runtime", runtime_module)
     monkeypatch.setattr(cutlass, "_COMPILE_CACHE", OrderedDict())
+    monkeypatch.setattr(cutlass, "_RUNTIME_LIBRARY_HANDLES", {})
+    monkeypatch.setattr(
+        cutlass.ctypes,
+        "CDLL",
+        lambda path, *, mode: state.calls.append(("load_runtime", path, mode)) or object(),
+    )
     state.enable_tvm_ffi = enable_tvm_ffi
     return state
 
@@ -101,9 +119,16 @@ def test_compile_to_object_forwards_options_and_caches(fake_cutlass):
     assert result == cutlass.SerializedFunction(object_bytes=b"object-1", function_name="softmax")
     assert result.sha256 == hashlib.sha256(b"object-1").hexdigest()
     assert fake_cutlass.calls == [
+        ("find_runtime_libraries", False),
+        (
+            "load_runtime",
+            "/fake/libcute_dsl_runtime.so",
+            getattr(cutlass.os, "RTLD_NOW", 0) | getattr(cutlass.os, "RTLD_GLOBAL", 0),
+        ),
         ("compile_option", fake_cutlass.enable_tvm_ffi),
         ("precompile", "mlir", function, ("argument",)),
         ("serialize", b"mlir-and-metadata-a"),
+        ("self_initialize_cuda", True),
         ("arch", "sm_90a"),
         ("compiler_option", "opt-level", "2"),
         ("compiler_option", "preserve-line-info", "true"),
@@ -145,6 +170,17 @@ def test_compile_to_object_no_cache_bypasses_lookup_and_insertion(fake_cutlass):
         "precompile",
         "serialize",
     ]
+
+
+def test_compile_to_object_requires_self_initializing_compiler(fake_cutlass, monkeypatch):
+    compiler_type = sys.modules["cutlass.compiler"].CuteCompiler
+    monkeypatch.delattr(compiler_type, "set_tvm_ffi_self_initialize_cuda")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"CuteCompiler\.set_tvm_ffi_self_initialize_cuda",
+    ):
+        cutlass.compile_to_object(lambda: None, gpu_arch="sm_90a", no_cache=True)
 
 
 def test_compile_to_object_cache_keys_artifact_arch_and_options(fake_cutlass):

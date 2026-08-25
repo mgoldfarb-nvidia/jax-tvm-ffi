@@ -98,18 +98,32 @@ once that wheel is published. Until then, use `uv sync --extra orcjit`; this
 repository pins the coordinated
 [upstream ORCJIT revision](https://github.com/apache/tvm-ffi/commit/c4a89570a9b361301eded1aff7933f5a7ff2f9f3).
 `ffi_call_from_object` embeds a native relocatable object and entry-point name
-in the StableHLO custom call. At executable instantiation, a shared TVM-FFI
-ORCJIT session loads the object directly from the serialized bytes. JAX TVM FFI
+in the StableHLO custom call. The object uses a base64 transport envelope that
+reduces PJRT executable expansion for binary attributes, then a native loader
+decodes it at executable instantiation before a shared TVM-FFI ORCJIT session
+loads it. JAX TVM FFI
 weakly interns the resulting module by loader and payload SHA-256, then resolves
 the exported host launcher from that module. Each executable strongly owns the
 shared module, resolved function, and decoded argument mapping for every launch.
 The cache does not extend module lifetime, so a module can unload after its last
 executable and in-flight instantiation owner is destroyed.
 
+Creating the first payload-, object-, or serialized-function call for a
+platform initializes that JAX backend to satisfy state-type registration
+ordering. Complete `jax.distributed.initialize()` and other backend
+configuration before constructing these calls.
+
 CUTLASS DSL users can obtain the object bytes, exported name, and SHA-256
 digest with `jax_tvm_ffi.cutlass.compile_to_object`. Object compilation uses a
 bounded in-process cache keyed by precompiled artifact, target, and lowering
-options; pass `no_cache=True` to force recompilation.
+options; pass `no_cache=True` to force recompilation. This serialized CuTe path
+also requires an unreleased compiler extension exposing
+`CuteCompiler.set_tvm_ffi_self_initialize_cuda`; the public 4.6 release does not
+contain it. Until the coordinated DKG change is released, use a source build
+that provides that method. The helper loads the CuTe runtime libraries with
+process-global symbol visibility and retains them for module teardown. A
+process that consumes an already-serialized executable without recompiling must
+call `jax_tvm_ffi.cutlass.load_runtime()` first.
 
 ```python
 from jax_tvm_ffi.cutlass import compile_to_object
@@ -119,9 +133,8 @@ serialized_function = compile_to_object(
     *compile_args,
     compile_options={"preserve-line-info": "true"},
 )
-call = jax_tvm_ffi.ffi_call_from_object(
-    serialized_function.object_bytes,
-    serialized_function.function_name,
+call = jax_tvm_ffi.ffi_call_from_serialized(
+    serialized_function,
     jax.ShapeDtypeStruct(output_shape, jnp.float32),
     platform="gpu",
     arg_spec=("args", "rets", "attrs.scale"),
@@ -130,9 +143,10 @@ call = jax_tvm_ffi.ffi_call_from_object(
 result = jax.jit(lambda x: call(x, scale=scale))(input)
 ```
 
-The object should contain the TVM-FFI host export and any embedded device code,
-such as a CUBIN. On Linux this is an ELF relocatable object; ORCJIT also accepts
-the native object format on macOS and Windows. `ffi_call_from_payload` remains
+The object contains a TVM-FFI host export that lazily initializes and unloads
+its embedded device code, such as a CUBIN. On Linux this is an ELF relocatable
+object; ORCJIT also accepts the native object format on macOS and Windows.
+`ffi_call_from_payload` remains
 available for other serialized formats through a registered loader with
 signature `(Bytes) -> Module`. Call `clear_payload_module_cache()` to invalidate
 weak lookup entries; live executables keep their modules valid.

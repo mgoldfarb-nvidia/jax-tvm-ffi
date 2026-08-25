@@ -1110,6 +1110,63 @@ tvm::ffi::Module LoadOrcjitObjectModule(const tvm::ffi::Bytes& object_bytes) {
   return (*load_module)(session, objects, tvm::ffi::String()).cast<tvm::ffi::Module>();
 }
 
+constexpr std::array<int8_t, 256> MakeBase64DecodeTable() {
+  std::array<int8_t, 256> table{};
+  for (int8_t& value : table) value = -1;
+  for (int value = 'A'; value <= 'Z'; ++value) table[value] = value - 'A';
+  for (int value = 'a'; value <= 'z'; ++value) table[value] = value - 'a' + 26;
+  for (int value = '0'; value <= '9'; ++value) table[value] = value - '0' + 52;
+  table[static_cast<size_t>('+')] = 62;
+  table[static_cast<size_t>('/')] = 63;
+  return table;
+}
+
+tvm::ffi::Module LoadOrcjitBase64ObjectModule(const tvm::ffi::Bytes& encoded_object_bytes) {
+  if (encoded_object_bytes.size() == 0 || encoded_object_bytes.size() % 4 != 0) {
+    throw std::invalid_argument("Invalid base64 object payload size");
+  }
+  static constexpr std::array<int8_t, 256> kDecodeTable = MakeBase64DecodeTable();
+  const auto* encoded = reinterpret_cast<const unsigned char*>(encoded_object_bytes.data());
+  size_t padding = 0;
+  if (encoded[encoded_object_bytes.size() - 1] == '=') ++padding;
+  if (encoded[encoded_object_bytes.size() - 2] == '=') ++padding;
+  std::string decoded(encoded_object_bytes.size() / 4 * 3 - padding, '\0');
+  size_t decoded_offset = 0;
+  const size_t last_group = encoded_object_bytes.size() - 4;
+  for (size_t i = 0; i < last_group; i += 4) {
+    const int value0 = kDecodeTable[encoded[i]];
+    const int value1 = kDecodeTable[encoded[i + 1]];
+    const int value2 = kDecodeTable[encoded[i + 2]];
+    const int value3 = kDecodeTable[encoded[i + 3]];
+    if ((value0 | value1 | value2 | value3) < 0) {
+      throw std::invalid_argument("Invalid base64 object payload");
+    }
+    const uint32_t bits = static_cast<uint32_t>(value0 << 18 | value1 << 12 | value2 << 6 | value3);
+    decoded[decoded_offset++] = static_cast<char>(bits >> 16);
+    decoded[decoded_offset++] = static_cast<char>(bits >> 8);
+    decoded[decoded_offset++] = static_cast<char>(bits);
+  }
+
+  const bool third_is_padding = encoded[last_group + 2] == '=';
+  const bool fourth_is_padding = encoded[last_group + 3] == '=';
+  if (third_is_padding && !fourth_is_padding) {
+    throw std::invalid_argument("Invalid base64 object payload");
+  }
+  const int value0 = kDecodeTable[encoded[last_group]];
+  const int value1 = kDecodeTable[encoded[last_group + 1]];
+  const int value2 = third_is_padding ? 0 : kDecodeTable[encoded[last_group + 2]];
+  const int value3 = fourth_is_padding ? 0 : kDecodeTable[encoded[last_group + 3]];
+  if ((value0 | value1 | value2 | value3) < 0 || (third_is_padding && (value1 & 0x0F) != 0) ||
+      (fourth_is_padding && !third_is_padding && (value2 & 0x03) != 0)) {
+    throw std::invalid_argument("Invalid base64 object payload");
+  }
+  const uint32_t bits = static_cast<uint32_t>(value0 << 18 | value1 << 12 | value2 << 6 | value3);
+  decoded[decoded_offset++] = static_cast<char>(bits >> 16);
+  if (!third_is_padding) decoded[decoded_offset++] = static_cast<char>(bits >> 8);
+  if (!fourth_is_padding) decoded[decoded_offset++] = static_cast<char>(bits);
+  return LoadOrcjitObjectModule(tvm::ffi::Bytes(std::move(decoded)));
+}
+
 struct PayloadModuleKey {
   std::string loader;
   std::uintptr_t loader_identity;
@@ -1142,12 +1199,9 @@ struct LoadedPayloadModule {
 };
 
 struct PayloadModuleLoadState {
-  PayloadModuleLoadState(std::string payload, tvm::ffi::Function loader)
-      : payload(std::move(payload)),
-        loader(std::move(loader)),
-        loading_thread(std::this_thread::get_id()) {}
+  explicit PayloadModuleLoadState(tvm::ffi::Function loader)
+      : loader(std::move(loader)), loading_thread(std::this_thread::get_id()) {}
 
-  std::string payload;
   tvm::ffi::Function loader;
   std::thread::id loading_thread;
   PayloadModuleLoadStatus status = PayloadModuleLoadStatus::kLoading;
@@ -1188,7 +1242,7 @@ class PayloadModuleCache {
         auto it = entries_.find(cache_key);
         if (it == entries_.end()) {
           PruneExpiredLocked();
-          state = std::make_shared<PayloadModuleLoadState>(std::string(payload), *loader);
+          state = std::make_shared<PayloadModuleLoadState>(*loader);
           entries_.emplace(cache_key, state);
           break;
         }
@@ -1218,7 +1272,7 @@ class PayloadModuleCache {
 
         entries_.erase(it);
         PruneExpiredLocked();
-        state = std::make_shared<PayloadModuleLoadState>(std::string(payload), *loader);
+        state = std::make_shared<PayloadModuleLoadState>(*loader);
         entries_.emplace(cache_key, state);
         break;
       }
@@ -1226,7 +1280,7 @@ class PayloadModuleCache {
 
     std::shared_ptr<const LoadedPayloadModule> loaded_module;
     try {
-      const tvm::ffi::Bytes payload_bytes(state->payload.data(), state->payload.size());
+      tvm::ffi::Bytes payload_bytes(payload.data(), payload.size());
       tvm::ffi::Module module = state->loader(payload_bytes).cast<tvm::ffi::Module>();
       loaded_module = std::make_shared<const LoadedPayloadModule>(state->loader, std::move(module));
     } catch (...) {
@@ -1260,7 +1314,6 @@ class PayloadModuleCache {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       state->module = module;
-      state->payload.clear();
       state->loader = tvm::ffi::Function(nullptr);
       state->status = PayloadModuleLoadStatus::kReady;
       auto it = entries_.find(cache_key);
@@ -1436,31 +1489,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(JAXTVMFFIGpuPayloadCallInstantiate, InstantiatePay
                               xla::ffi::Ffi::BindInstantiate().Attrs());
 
 template <int DeviceType>
-thread_local PayloadCallState<DeviceType>* current_payload_call_state = nullptr;
-
-template <int DeviceType>
-xla::ffi::Error ResolvePayloadCallState(PayloadCallState<DeviceType>* state) {
-  current_payload_call_state<DeviceType> = state;
-  return xla::ffi::Error::Success();
-}
-
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    JAXTVMFFIResolveCpuPayloadCallState, ResolvePayloadCallState<kDLCPU>,
-    xla::ffi::Ffi::BindExecute().Ctx<xla::ffi::State<CpuPayloadCallState>>());
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    JAXTVMFFIResolveGpuPayloadCallState, ResolvePayloadCallState<kDLCUDA>,
-    xla::ffi::Ffi::BindExecute().Ctx<xla::ffi::State<GpuPayloadCallState>>());
-
-template <int DeviceType>
-XLA_FFI_Error* ResolvePayloadCallStateFromFrame(XLA_FFI_CallFrame* call_frame) {
-  if constexpr (DeviceType == kDLCPU) {
-    return JAXTVMFFIResolveCpuPayloadCallState(call_frame);
-  } else {
-    return JAXTVMFFIResolveGpuPayloadCallState(call_frame);
-  }
-}
-
-template <int DeviceType>
 class PayloadExecuteHandler : public xla::ffi::Ffi {
  public:
   XLA_FFI_Error* Call(XLA_FFI_CallFrame* call_frame) const final {
@@ -1479,12 +1507,17 @@ class PayloadExecuteHandler : public xla::ffi::Ffi {
       return InvalidArgument(call_frame->api, "Payload handler expected the execute stage");
     }
 
-    current_payload_call_state<DeviceType> = nullptr;
-    if (XLA_FFI_Error* error = ResolvePayloadCallStateFromFrame<DeviceType>(call_frame)) {
+    XLA_FFI_State_Get_Args state_args;
+    state_args.struct_size = XLA_FFI_State_Get_Args_STRUCT_SIZE;
+    state_args.extension_start = nullptr;
+    state_args.ctx = call_frame->ctx;
+    state_args.stage = XLA_FFI_ExecutionStage_INSTANTIATE;
+    state_args.type_id = &PayloadCallState<DeviceType>::id;
+    state_args.state = nullptr;
+    if (XLA_FFI_Error* error = call_frame->api->XLA_FFI_State_Get(&state_args)) {
       return error;
     }
-    PayloadCallState<DeviceType>* state = current_payload_call_state<DeviceType>;
-    current_payload_call_state<DeviceType> = nullptr;
+    auto* state = static_cast<PayloadCallState<DeviceType>*>(state_args.state);
     if (XLA_FFI_PREDICT_FALSE(state == nullptr || state->handler == nullptr)) {
       return MakeError(call_frame->api, XLA_FFI_Error_Code_FAILED_PRECONDITION,
                        "Payload call state was not instantiated");
@@ -1655,6 +1688,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(register_tvm_ffi_handler, JAXTVMFFIRegistry::Regis
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(registered_count, JAXTVMFFIRegistry::RegisteredCount);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(get_last_workspace_peak, GetLastWorkspacePeak);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(load_orcjit_object_module, LoadOrcjitObjectModule);
+TVM_FFI_DLL_EXPORT_TYPED_FUNC(load_orcjit_base64_object_module, LoadOrcjitBase64ObjectModule);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_instantiate_handler, PayloadCallInstantiateHandler);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_execute_handler, PayloadCallExecuteHandler);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_state_type_id, PayloadCallStateTypeId);

@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import gc
+import os
+import subprocess
+import sys
 import threading
+import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -38,6 +42,44 @@ _PAYLOAD_CPP_SOURCE = r"""
     }
 """
 _PAYLOAD_FUNCTIONS = ("add", "subtract")
+
+
+def test_payload_target_registers_before_backend_initialization():
+    script = """
+import jax
+import jax.numpy as jnp
+import jax_tvm_ffi
+
+call = jax_tvm_ffi.ffi_call_from_payload(
+    b"payload",
+    "missing.Loader",
+    "missing",
+    jax.ShapeDtypeStruct((1,), jnp.float32),
+    platform="cpu",
+)
+try:
+    jax.jit(call)(jnp.zeros((1,), jnp.float32))
+except Exception as error:
+    if "Payload loader 'missing.Loader' is not registered" not in str(error):
+        raise
+else:
+    raise AssertionError("Missing payload loader unexpectedly succeeded")
+"""
+    environment = os.environ.copy()
+    environment["JAX_PLATFORMS"] = "cpu"
+    subprocess.run([sys.executable, "-c", script], check=True, env=environment)
+
+
+@pytest.mark.parametrize("object_bytes", [b"", bytearray(b"object"), "object", None])
+def test_serialized_function_rejects_invalid_object_bytes(object_bytes):
+    with pytest.raises(ValueError, match="object_bytes must be nonempty bytes"):
+        jax_tvm_ffi.SerializedFunction(object_bytes, "add")
+
+
+@pytest.mark.parametrize("function_name", ["", 1, None])
+def test_serialized_function_rejects_invalid_function_name(function_name):
+    with pytest.raises(ValueError, match="function_name must be a nonempty string"):
+        jax_tvm_ffi.SerializedFunction(b"object", function_name)
 
 
 @pytest.fixture(scope="module")
@@ -207,6 +249,71 @@ def test_object_call_loads_orcjit_object(object_bytes, request):
 
     add_two = jax.jit(lambda value: call(value, increment=2))
     numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
+
+
+def test_object_entry_points_share_module_cache(object_bytes, request):
+    jax_tvm_ffi.clear_payload_module_cache()
+    loader_name = "jax_tvm_ffi.LoadOrcjitBase64ObjectModule"
+    original_loader = tvm_ffi.get_global_func(loader_name)
+    load_count = 0
+
+    @tvm_ffi.register_global_func(loader_name, override=True)
+    def tracked_loader(payload_bytes):
+        nonlocal load_count
+        load_count += 1
+        return original_loader(payload_bytes)
+
+    def cleanup():
+        jax_tvm_ffi.clear_payload_module_cache()
+        tvm_ffi.register_global_func(loader_name, original_loader, override=True)
+
+    request.addfinalizer(cleanup)
+    serialized = jax_tvm_ffi.SerializedFunction(object_bytes, "add")
+    result = jax.ShapeDtypeStruct((8,), jnp.float32)
+    call_options = {
+        "platform": "cpu",
+        "arg_spec": ("attrs.increment", "rets", "args"),
+        "workspaces": (jax_tvm_ffi.Workspace(64),),
+    }
+    object_call = jax_tvm_ffi.ffi_call_from_object(object_bytes, "add", result, **call_options)
+    serialized_call = jax_tvm_ffi.ffi_call_from_serialized(serialized, result, **call_options)
+    x = jnp.arange(8, dtype=jnp.float32)
+    add_one = jax.jit(lambda value: object_call(value, increment=1)).lower(x).compile()
+    add_two = jax.jit(lambda value: serialized_call(value, increment=2)).lower(x).compile()
+
+    numpy.testing.assert_equal(numpy.asarray(add_one(x)), numpy.asarray(x + 1))
+    numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
+    assert load_count == 1
+
+
+def test_serialized_function_call_reuses_digest(object_bytes, monkeypatch, request):
+    request.addfinalizer(jax_tvm_ffi.clear_payload_module_cache)
+    serialized = jax_tvm_ffi.SerializedFunction(object_bytes, "add")
+
+    def reject_rehash(_):
+        raise AssertionError("serialized object was rehashed")
+
+    monkeypatch.setattr(jax_tvm_ffi, "hashlib", types.SimpleNamespace(sha256=reject_rehash))
+    call = jax_tvm_ffi.ffi_call_from_serialized(
+        serialized,
+        jax.ShapeDtypeStruct((8,), jnp.float32),
+        platform="cpu",
+        arg_spec=("attrs.increment", "rets", "args"),
+        workspaces=(jax_tvm_ffi.Workspace(64),),
+    )
+    x = jnp.arange(8, dtype=jnp.float32)
+
+    numpy.testing.assert_equal(
+        numpy.asarray(jax.jit(lambda value: call(value, increment=2))(x)),
+        numpy.asarray(x + 2),
+    )
+
+
+@pytest.mark.parametrize("payload", [b"!!!!", b"AAA", b"A==="])
+def test_base64_object_loader_rejects_invalid_payload(payload):
+    loader = tvm_ffi.get_global_func("jax_tvm_ffi.LoadOrcjitBase64ObjectModule")
+    with pytest.raises(Exception, match="Invalid base64 object payload"):
+        loader(payload)
 
 
 def test_payload_call_rejects_missing_export(payload_module, request):

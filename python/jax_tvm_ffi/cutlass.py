@@ -2,28 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """CUTLASS DSL compilation helpers for JAX TVM FFI."""
 
+import ctypes
 import hashlib
 import importlib
 import os
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import jax
 
-
-@dataclass(frozen=True)
-class SerializedFunction:
-    """Serialized TVM FFI object, exported function name, and object digest."""
-
-    object_bytes: bytes
-    function_name: str
-    sha256: str = field(init=False)
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "sha256", hashlib.sha256(self.object_bytes).hexdigest())
+from . import SerializedFunction
 
 
 @dataclass(frozen=True)
@@ -37,6 +28,38 @@ _COMPILE_CACHE_MAX_ENTRIES = 128
 _COMPILE_CACHE_MAX_BYTES = 256 * 1024**2
 _COMPILE_CACHE: OrderedDict[_CompileCacheKey, SerializedFunction] = OrderedDict()
 _COMPILE_LOCK = threading.Lock()
+_RUNTIME_LOCK = threading.Lock()
+_RUNTIME_LIBRARY_HANDLES: dict[str, ctypes.CDLL] = {}
+
+
+def load_runtime() -> None:
+    """Load CUTLASS DSL runtime libraries for ORCJIT symbol resolution.
+
+    The handles remain alive for the process lifetime because serialized
+    modules can run destructors after their last JAX executable is released.
+    """
+    with _RUNTIME_LOCK:
+        if _RUNTIME_LIBRARY_HANDLES:
+            return
+        try:
+            cutlass_runtime = importlib.import_module("cutlass.runtime")
+        except ImportError as error:
+            raise ImportError(
+                "load_runtime requires CuTe DSL; install jax-tvm-ffi[cutedsl]"
+            ) from error
+
+        runtime_paths = cutlass_runtime.find_runtime_libraries(enable_tvm_ffi=False)
+        if not runtime_paths:
+            raise RuntimeError("CuTe DSL did not provide a runtime library")
+        mode = getattr(os, "RTLD_NOW", 0) | getattr(os, "RTLD_GLOBAL", 0)
+        handles: dict[str, ctypes.CDLL] = {}
+        for path_like in runtime_paths:
+            path = os.fspath(path_like)
+            try:
+                handles[path] = ctypes.CDLL(path, mode=mode)
+            except OSError as error:
+                raise RuntimeError(f"Failed to load CuTe DSL runtime library {path!r}") from error
+        _RUNTIME_LIBRARY_HANDLES.update(handles)
 
 
 def _target_arch(gpu_arch: str | None) -> str:
@@ -83,6 +106,9 @@ def compile_to_object(
 
     Notes:
         This helper uses CuTe DSL's experimental fine-grained compilation API.
+        The emitted TVM FFI wrapper lazily initializes its embedded CUDA module
+        across visible devices and owns unloading it. CuTe runtime libraries are
+        loaded globally so ORCJIT can resolve the object's host-runtime symbols.
         Cache keys include the serialized PreCompiledMlir artifact, resolved
         GPU architecture, and lowering options. The cache evicts least-recently
         used objects when it reaches its entry or byte limit.
@@ -100,6 +126,7 @@ def compile_to_object(
     normalized_options = tuple(sorted((compile_options or {}).items()))
 
     with _COMPILE_LOCK:
+        load_runtime()
         precompiled = cute.compile[cutlass_dsl.EnableTVMFFI].compile_to(
             cutlass_compiler.ArtifactType.PreCompiledMlir,
             function,
@@ -121,6 +148,14 @@ def compile_to_object(
                 return cached
 
         compiler = cutlass_compiler.CuteCompiler()
+        configure_lifecycle = getattr(compiler, "set_tvm_ffi_self_initialize_cuda", None)
+        if configure_lifecycle is None:
+            raise RuntimeError(
+                "The serialized CuTe path requires a compiler build exposing "
+                "CuteCompiler.set_tvm_ffi_self_initialize_cuda; released "
+                "nvidia-cutlass-dsl 4.6 does not provide it"
+            )
+        configure_lifecycle(True)
         compiler.set_device_target(resolved_arch)
         for option_name, option_value in normalized_options:
             compiler.add_compile_option(option_name, option_value)
