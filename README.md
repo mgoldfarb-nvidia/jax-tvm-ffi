@@ -117,13 +117,13 @@ CUTLASS DSL users can obtain the object bytes, exported name, and SHA-256
 digest with `jax_tvm_ffi.cutlass.compile_to_object`. Object compilation uses a
 bounded in-process cache keyed by precompiled artifact, target, and lowering
 options; pass `no_cache=True` to force recompilation. This serialized CuTe path
-also requires an unreleased compiler extension exposing
-`CuteCompiler.set_tvm_ffi_self_initialize_cuda`; the public 4.6 release does not
-contain it. Until the coordinated DKG change is released, use a source build
-that provides that method. The helper loads the CuTe runtime libraries with
-process-global symbol visibility and retains them for module teardown. A
-process that consumes an already-serialized executable without recompiling must
-call `jax_tvm_ffi.cutlass.load_runtime()` first.
+requires the coordinated unreleased compiler change that makes CUDA TVM-FFI
+objects own their lazy initialization and teardown automatically; the public
+4.6 release does not contain it. Until that change is released, use a DKG source
+build. The helper loads the CuTe runtime libraries with process-global symbol
+visibility and retains them for module teardown. A process that consumes an
+already-serialized executable without recompiling must call
+`jax_tvm_ffi.cutlass.load_runtime()` first.
 
 ```python
 from jax_tvm_ffi.cutlass import compile_to_object

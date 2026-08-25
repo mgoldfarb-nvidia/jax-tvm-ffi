@@ -106,9 +106,10 @@ def compile_to_object(
 
     Notes:
         This helper uses CuTe DSL's experimental fine-grained compilation API.
-        The emitted TVM FFI wrapper lazily initializes its embedded CUDA module
-        across visible devices and owns unloading it. CuTe runtime libraries are
-        loaded globally so ORCJIT can resolve the object's host-runtime symbols.
+        It requires the coordinated compiler change that makes CUDA TVM FFI
+        objects own lazy initialization and teardown; public CuTe DSL 4.6 does
+        not include that behavior. CuTe runtime libraries are loaded globally
+        so ORCJIT can resolve the object's host-runtime symbols.
         Cache keys include the serialized PreCompiledMlir artifact, resolved
         GPU architecture, and lowering options. The cache evicts least-recently
         used objects when it reaches its entry or byte limit.
@@ -119,7 +120,9 @@ def compile_to_object(
         cutlass_dsl = importlib.import_module("cutlass.cutlass_dsl")
     except ImportError as error:
         raise ImportError(
-            "compile_to_object requires CuTe DSL 4.6 or newer; install jax-tvm-ffi[cutedsl]"
+            "compile_to_object requires the coordinated CuTe DSL source build; "
+            "install jax-tvm-ffi[cutedsl] and replace its public 4.6 compiler "
+            "with that build"
         ) from error
 
     resolved_arch = _target_arch(gpu_arch)
@@ -148,14 +151,6 @@ def compile_to_object(
                 return cached
 
         compiler = cutlass_compiler.CuteCompiler()
-        configure_lifecycle = getattr(compiler, "set_tvm_ffi_self_initialize_cuda", None)
-        if configure_lifecycle is None:
-            raise RuntimeError(
-                "The serialized CuTe path requires a compiler build exposing "
-                "CuteCompiler.set_tvm_ffi_self_initialize_cuda; released "
-                "nvidia-cutlass-dsl 4.6 does not provide it"
-            )
-        configure_lifecycle(True)
         compiler.set_device_target(resolved_arch)
         for option_name, option_value in normalized_options:
             compiler.add_compile_option(option_name, option_value)

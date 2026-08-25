@@ -37,9 +37,6 @@ def fake_cutlass(monkeypatch):
             return types.SimpleNamespace(serialized=state.serialized_artifact)
 
     class CuteCompiler:
-        def set_tvm_ffi_self_initialize_cuda(self, enabled):
-            state.calls.append(("self_initialize_cuda", enabled))
-
         def set_abi(self, abi):
             state.calls.append(("abi", abi))
 
@@ -128,7 +125,6 @@ def test_compile_to_object_forwards_options_and_caches(fake_cutlass):
         ("compile_option", fake_cutlass.enable_tvm_ffi),
         ("precompile", "mlir", function, ("argument",)),
         ("serialize", b"mlir-and-metadata-a"),
-        ("self_initialize_cuda", True),
         ("arch", "sm_90a"),
         ("compiler_option", "opt-level", "2"),
         ("compiler_option", "preserve-line-info", "true"),
@@ -170,17 +166,6 @@ def test_compile_to_object_no_cache_bypasses_lookup_and_insertion(fake_cutlass):
         "precompile",
         "serialize",
     ]
-
-
-def test_compile_to_object_requires_self_initializing_compiler(fake_cutlass, monkeypatch):
-    compiler_type = sys.modules["cutlass.compiler"].CuteCompiler
-    monkeypatch.delattr(compiler_type, "set_tvm_ffi_self_initialize_cuda")
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"CuteCompiler\.set_tvm_ffi_self_initialize_cuda",
-    ):
-        cutlass.compile_to_object(lambda: None, gpu_arch="sm_90a", no_cache=True)
 
 
 def test_compile_to_object_cache_keys_artifact_arch_and_options(fake_cutlass):

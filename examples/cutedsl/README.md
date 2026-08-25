@@ -34,10 +34,10 @@ pip install "jax-tvm-ffi[cutedsl,orcjit]"
 python -m examples.cutedsl.jax_softmax_serialized
 ```
 
-The serialized path currently also requires an unreleased CuTe DSL compiler
-extension exposing `CuteCompiler.set_tvm_ffi_self_initialize_cuda`; public
-`nvidia-cutlass-dsl` 4.6 does not contain it. Use a coordinated DKG source build
-until that extension and ORCJIT 0.1.1 are published.
+The serialized path currently also requires the coordinated unreleased CuTe DSL
+compiler change that makes CUDA TVM-FFI objects own their lazy initialization
+and teardown automatically; public `nvidia-cutlass-dsl` 4.6 does not contain
+it. Use a DKG source build until that change and ORCJIT 0.1.1 are published.
 
 The serialized example uses the CuTe DSL artifact compiler to produce a
 `SerializedFunction` containing the TVM FFI object bytes, exported function
