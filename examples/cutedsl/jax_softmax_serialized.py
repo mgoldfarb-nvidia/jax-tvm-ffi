@@ -61,33 +61,43 @@ def register_softmax_ops(N: int, dtype: DType = jnp.bfloat16) -> None:
     cutlass_dtype = _get_cutlass_dtype(dtype)
     forward = _compile_softmax_forward_object(cutlass_dtype, N)
     backward = _compile_softmax_backward_object(cutlass_dtype, N)
+    forward_calls: dict[tuple[tuple[int, ...], str], Callable[[Array], Array]] = {}
+    backward_calls: dict[tuple[tuple[int, ...], str], Callable[[Array, Array], Array]] = {}
+
+    def get_forward_call(x: Array) -> Callable[[Array], Array]:
+        key = (x.shape, jnp.dtype(x.dtype).name)
+        if key not in forward_calls:
+            forward_calls[key] = jax_tvm_ffi.ffi_call_from_serialized(
+                forward,
+                jax.ShapeDtypeStruct(x.shape, x.dtype),
+                platform="gpu",
+                arg_spec=("args", "rets"),
+                vmap_method="broadcast_all",
+            )
+        return forward_calls[key]
+
+    def get_backward_call(g: Array) -> Callable[[Array, Array], Array]:
+        key = (g.shape, jnp.dtype(g.dtype).name)
+        if key not in backward_calls:
+            backward_calls[key] = jax_tvm_ffi.ffi_call_from_serialized(
+                backward,
+                jax.ShapeDtypeStruct(g.shape, g.dtype),
+                platform="gpu",
+                arg_spec=("args", "rets"),
+                vmap_method="broadcast_all",
+            )
+        return backward_calls[key]
 
     @jax.custom_vjp
     def softmax_fn(x: Array) -> Array:
-        call = jax_tvm_ffi.ffi_call_from_object(
-            forward.object_bytes,
-            forward.function_name,
-            jax.ShapeDtypeStruct(x.shape, x.dtype),
-            platform="gpu",
-            arg_spec=("args", "rets"),
-            vmap_method="broadcast_all",
-        )
-        return call(x)
+        return get_forward_call(x)(x)
 
     def softmax_fwd(x: Array) -> tuple[Array, Array]:
         y = softmax_fn(x)
         return y, y
 
     def softmax_bwd(y: Array, g: Array) -> tuple[Array]:
-        call = jax_tvm_ffi.ffi_call_from_object(
-            backward.object_bytes,
-            backward.function_name,
-            jax.ShapeDtypeStruct(g.shape, g.dtype),
-            platform="gpu",
-            arg_spec=("args", "rets"),
-            vmap_method="broadcast_all",
-        )
-        return (call(g, y),)
+        return (get_backward_call(g)(g, y),)
 
     softmax_fn.defvjp(softmax_fwd, softmax_bwd)
     _SERIALIZED_KERNELS[cache_key] = softmax_fn

@@ -34,6 +34,11 @@ pip install "jax-tvm-ffi[cutedsl,orcjit]"
 python -m examples.cutedsl.jax_softmax_serialized
 ```
 
+The serialized path currently also requires an unreleased CuTe DSL compiler
+extension exposing `CuteCompiler.set_tvm_ffi_self_initialize_cuda`; public
+`nvidia-cutlass-dsl` 4.6 does not contain it. Use a coordinated DKG source build
+until that extension and ORCJIT 0.1.1 are published.
+
 The serialized example uses the CuTe DSL artifact compiler to produce a
 `SerializedFunction` containing the TVM FFI object bytes, exported function
 name, and SHA-256 digest. It embeds the bytes and name in the HLO without writing
@@ -45,6 +50,11 @@ executables own the shared module. The reusable compiler entry point is
 experimental fine-grained compilation API.
 Pass a `compile_options` key/value mapping to override lowering options accepted
 by `CuteCompiler.add_compile_option`; the TVM FFI ABI remains mandatory.
+The generated wrapper owns lazy CUDA initialization and unloading. The helper
+loads the installed CuTe runtime libraries with process-global visibility so
+ORCJIT can resolve the object's runtime symbols; call
+`jax_tvm_ffi.cutlass.load_runtime()` when loading a previously serialized JAX
+executable in a fresh process without recompiling the kernel first.
 Identical artifacts are reused from a process-local compiled-object cache. Pass
 `no_cache=True` to force recompilation, including when compiler options are used
 for diagnostic output or other side effects.
