@@ -34,30 +34,27 @@ pip install "jax-tvm-ffi[cutedsl,orcjit]"
 python -m examples.cutedsl.jax_softmax_serialized
 ```
 
-The serialized path currently also requires the coordinated unreleased CuTe DSL
-compiler change that makes CUDA TVM-FFI objects own their lazy initialization
-and teardown automatically; public `nvidia-cutlass-dsl` 4.6 does not contain
-it. Use a DKG source build until that change and ORCJIT 0.1.1 are published.
+The serialized path requires the coordinated CuTe DSL change that lets a legacy
+CUDA TVM-FFI compiled handle dump itself to object bytes. The object preserves the
+kernel's lazy CUDA initialization and exports `__tvm_ffi_module_init` for
+explicit initialization. Use a DKG source build until that change and ORCJIT
+0.1.1 are published.
 
-The serialized example uses the CuTe DSL artifact compiler to produce a
-`SerializedFunction` containing the TVM FFI object bytes, exported function
-name, and SHA-256 digest. It embeds the bytes and name in the HLO without writing
-an object file. The installed ORCJIT extension must support loading object bytes
-through its existing execution-session API. JAX TVM FFI caches the loaded module
-weakly by object SHA-256 and resolves each requested function from it. Live JAX
-executables own the shared module. The reusable compiler entry point is
-`jax_tvm_ffi.cutlass.compile_to_object`; it currently relies on CuTe DSL's
-experimental fine-grained compilation API.
-Pass a `compile_options` key/value mapping to override lowering options accepted
-by `CuteCompiler.add_compile_option`; the TVM FFI ABI remains mandatory.
-The generated wrapper owns lazy CUDA initialization and unloading. The helper
-loads the installed CuTe runtime libraries with process-global visibility so
-ORCJIT can resolve the object's runtime symbols; call
+The serialized example uses the established `cute.compile[EnableTVMFFI]` path
+and serializes its compiled handle into a `SerializedFunction` containing the
+TVM FFI object bytes, exported function name, and SHA-256 digest. It embeds the
+bytes and name in the HLO without writing an object file. The installed ORCJIT
+extension loads object bytes through its existing execution-session API. JAX
+TVM FFI caches the loaded module weakly by object SHA-256 and resolves each
+requested function from it. Live JAX executables own the shared module. The
+reusable entry point is `jax_tvm_ffi.cutlass.compile_to_object`. Pass additional
+legacy compiler flags in the `compile_options` string; they are appended after
+the helper's defaults and can override them. The helper always adds
+`--enable-tvm-ffi`. It also loads the installed CuTe runtime libraries with
+process-global visibility so ORCJIT can resolve the object's runtime symbols;
+call
 `jax_tvm_ffi.cutlass.load_runtime()` when loading a previously serialized JAX
 executable in a fresh process without recompiling the kernel first.
-Identical artifacts are reused from a process-local compiled-object cache. Pass
-`no_cache=True` to force recompilation, including when compiler options are used
-for diagnostic output or other side effects.
 
 ## Usage
 

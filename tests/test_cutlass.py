@@ -4,7 +4,6 @@
 import hashlib
 import sys
 import types
-from collections import OrderedDict
 
 import pytest
 from jax_tvm_ffi import cutlass
@@ -14,54 +13,32 @@ from jax_tvm_ffi import cutlass
 def fake_cutlass(monkeypatch):
     state = types.SimpleNamespace(
         calls=[],
-        object_count=0,
-        serialized_artifact=b"mlir-and-metadata-a",
+        dump_error=None,
+        has_gpu_module=True,
+        object_bytes=b"object\0__tvm_ffi_softmax\0__tvm_ffi_module_init\0",
     )
 
-    class ObjectArtifact:
-        def __init__(self, data):
-            self._data = data
-            self.metadata = [types.SimpleNamespace(symbol_name="softmax")]
+    class CompiledFunction:
+        function_name = "softmax"
 
-        def get_data(self):
-            state.calls.append(("get_data",))
-            return self._data
+        @property
+        def has_gpu_module(self):
+            return state.has_gpu_module
+
+        def dump_to_object(self, function_prefix):
+            state.calls.append(("dump_to_object", function_prefix))
+            if state.dump_error is not None:
+                raise state.dump_error
+            return state.object_bytes
 
     class CompileCallable:
         def __getitem__(self, option):
             state.calls.append(("compile_option", option))
             return self
 
-        def compile_to(self, target, function, *args):
-            state.calls.append(("precompile", target, function, args))
-            return types.SimpleNamespace(serialized=state.serialized_artifact)
-
-    class CuteCompiler:
-        def set_abi(self, abi):
-            state.calls.append(("abi", abi))
-
-        def set_device_target(self, arch):
-            state.calls.append(("arch", arch))
-
-        def add_compile_option(self, key, value):
-            state.calls.append(("compiler_option", key, value))
-
-        def compile_to(self, artifact, target):
-            state.object_count += 1
-            state.calls.append(("object", artifact.serialized, target))
-            return ObjectArtifact(f"object-{state.object_count}".encode())
-
-    def serialize_compilation_artifact(artifact):
-        state.calls.append(("serialize", artifact.serialized))
-        return artifact.serialized
-
-    artifact_type = types.SimpleNamespace(PreCompiledMlir="mlir", Object="object")
-    abi = types.SimpleNamespace(TvmFfi="tvm_ffi")
-    compiler_module = types.ModuleType("cutlass.compiler")
-    compiler_module.Abi = abi
-    compiler_module.ArtifactType = artifact_type
-    compiler_module.CuteCompiler = CuteCompiler
-    compiler_module.serialize_compilation_artifact = serialize_compilation_artifact
+        def __call__(self, function, *args, options):
+            state.calls.append(("compile", function, args, options))
+            return CompiledFunction()
 
     enable_tvm_ffi = object()
     cutlass_dsl_module = types.ModuleType("cutlass.cutlass_dsl")
@@ -80,15 +57,12 @@ def fake_cutlass(monkeypatch):
 
     cutlass_module = types.ModuleType("cutlass")
     cutlass_module.__path__ = []
-    cutlass_module.compiler = compiler_module
     cutlass_module.cute = cute_module
 
     monkeypatch.setitem(sys.modules, "cutlass", cutlass_module)
-    monkeypatch.setitem(sys.modules, "cutlass.compiler", compiler_module)
     monkeypatch.setitem(sys.modules, "cutlass.cute", cute_module)
     monkeypatch.setitem(sys.modules, "cutlass.cutlass_dsl", cutlass_dsl_module)
     monkeypatch.setitem(sys.modules, "cutlass.runtime", runtime_module)
-    monkeypatch.setattr(cutlass, "_COMPILE_CACHE", OrderedDict())
     monkeypatch.setattr(cutlass, "_RUNTIME_LIBRARY_HANDLES", {})
     monkeypatch.setattr(
         cutlass.ctypes,
@@ -99,22 +73,21 @@ def fake_cutlass(monkeypatch):
     return state
 
 
-def test_compile_to_object_forwards_options_and_caches(fake_cutlass):
+def test_compile_to_object_dumps_legacy_compiled_handle(fake_cutlass):
     function = lambda: None
-    options = {
-        "preserve-line-info": "true",
-        "opt-level": "2",
-    }
 
     result = cutlass.compile_to_object(
         function,
         "argument",
         gpu_arch="sm_90a",
-        compile_options=options,
+        compile_options="--preserve-line-info --opt-level 2",
     )
 
-    assert result == cutlass.SerializedFunction(object_bytes=b"object-1", function_name="softmax")
-    assert result.sha256 == hashlib.sha256(b"object-1").hexdigest()
+    assert result == cutlass.SerializedFunction(
+        object_bytes=fake_cutlass.object_bytes,
+        function_name="softmax",
+    )
+    assert result.sha256 == hashlib.sha256(fake_cutlass.object_bytes).hexdigest()
     assert fake_cutlass.calls == [
         ("find_runtime_libraries", False),
         (
@@ -123,85 +96,67 @@ def test_compile_to_object_forwards_options_and_caches(fake_cutlass):
             getattr(cutlass.os, "RTLD_NOW", 0) | getattr(cutlass.os, "RTLD_GLOBAL", 0),
         ),
         ("compile_option", fake_cutlass.enable_tvm_ffi),
-        ("precompile", "mlir", function, ("argument",)),
-        ("serialize", b"mlir-and-metadata-a"),
-        ("arch", "sm_90a"),
-        ("compiler_option", "opt-level", "2"),
-        ("compiler_option", "preserve-line-info", "true"),
-        ("abi", "tvm_ffi"),
-        ("object", b"mlir-and-metadata-a", "object"),
-        ("get_data",),
+        (
+            "compile",
+            function,
+            ("argument",),
+            "--enable-tvm-ffi --gpu-arch sm_90a --preserve-line-info --opt-level 2",
+        ),
+        ("dump_to_object", "softmax"),
     ]
 
-    fake_cutlass.calls.clear()
-    cached = cutlass.compile_to_object(
-        function,
-        "argument",
+
+def test_compile_to_object_always_enables_tvm_ffi(fake_cutlass):
+    cutlass.compile_to_object(lambda: None)
+
+    compile_call = next(call for call in fake_cutlass.calls if call[0] == "compile")
+    assert compile_call[-1] == "--enable-tvm-ffi"
+
+
+def test_compile_to_object_appends_custom_options(fake_cutlass):
+    cutlass.compile_to_object(
+        lambda: None,
         gpu_arch="sm_90a",
-        compile_options=dict(reversed(options.items())),
+        compile_options="--gpu-arch sm_100a --enable-tvm-ffi",
     )
 
-    assert cached is result
-    assert fake_cutlass.calls == [
-        ("compile_option", fake_cutlass.enable_tvm_ffi),
-        ("precompile", "mlir", function, ("argument",)),
-        ("serialize", b"mlir-and-metadata-a"),
-    ]
-
-
-def test_compile_to_object_no_cache_bypasses_lookup_and_insertion(fake_cutlass):
-    function = lambda: None
-    cached = cutlass.compile_to_object(function, gpu_arch="sm_90a")
-
-    fake_cutlass.calls.clear()
-    uncached = cutlass.compile_to_object(function, gpu_arch="sm_90a", no_cache=True)
-
-    assert uncached.object_bytes == b"object-2"
-    assert all(call[0] != "serialize" for call in fake_cutlass.calls)
-
-    fake_cutlass.calls.clear()
-    assert cutlass.compile_to_object(function, gpu_arch="sm_90a") is cached
-    assert [call[0] for call in fake_cutlass.calls] == [
-        "compile_option",
-        "precompile",
-        "serialize",
-    ]
-
-
-def test_compile_to_object_cache_keys_artifact_arch_and_options(fake_cutlass):
-    function = lambda: None
-    first = cutlass.compile_to_object(function, gpu_arch="sm_90a")
-
-    fake_cutlass.serialized_artifact = b"mlir-and-metadata-b"
-    changed_artifact = cutlass.compile_to_object(function, gpu_arch="sm_90a")
-    changed_options = cutlass.compile_to_object(
-        function,
-        gpu_arch="sm_90a",
-        compile_options={"opt-level": "2"},
-    )
-    changed_arch = cutlass.compile_to_object(
-        function,
-        gpu_arch="sm_100a",
-        compile_options={"opt-level": "2"},
+    compile_call = next(call for call in fake_cutlass.calls if call[0] == "compile")
+    assert compile_call[-1] == (
+        "--enable-tvm-ffi --gpu-arch sm_90a --gpu-arch sm_100a --enable-tvm-ffi"
     )
 
-    assert [
-        result.object_bytes for result in (first, changed_artifact, changed_options, changed_arch)
-    ] == [b"object-1", b"object-2", b"object-3", b"object-4"]
 
-
-@pytest.mark.parametrize(
-    ("max_entries", "max_bytes"),
-    [(1, 1024), (128, len(b"object-1"))],
-)
-def test_compile_to_object_cache_is_bounded(fake_cutlass, monkeypatch, max_entries, max_bytes):
-    monkeypatch.setattr(cutlass, "_COMPILE_CACHE_MAX_ENTRIES", max_entries)
-    monkeypatch.setattr(cutlass, "_COMPILE_CACHE_MAX_BYTES", max_bytes)
+def test_compile_to_object_loads_runtime_once_without_compilation_cache(fake_cutlass):
     function = lambda: None
-    cutlass.compile_to_object(function, gpu_arch="sm_90a")
 
-    fake_cutlass.serialized_artifact = b"mlir-and-metadata-b"
-    cutlass.compile_to_object(function, gpu_arch="sm_90a")
-    fake_cutlass.serialized_artifact = b"mlir-and-metadata-a"
+    cutlass.compile_to_object(function)
+    cutlass.compile_to_object(function)
 
-    assert cutlass.compile_to_object(function, gpu_arch="sm_90a").object_bytes == b"object-3"
+    call_names = [call[0] for call in fake_cutlass.calls]
+    assert call_names.count("find_runtime_libraries") == 1
+    assert call_names.count("load_runtime") == 1
+    assert call_names.count("compile") == 2
+    assert call_names.count("dump_to_object") == 2
+
+
+def test_compile_to_object_propagates_dump_failure(fake_cutlass):
+    fake_cutlass.dump_error = RuntimeError("object emission failed")
+
+    with pytest.raises(RuntimeError, match="object emission failed"):
+        cutlass.compile_to_object(lambda: None)
+
+
+def test_compile_to_object_rejects_generic_object_dump(fake_cutlass):
+    fake_cutlass.object_bytes = b"object\0generic___tvm_ffi_softmax\0"
+
+    with pytest.raises(RuntimeError, match="__tvm_ffi_module_init"):
+        cutlass.compile_to_object(lambda: None)
+
+
+def test_compile_to_object_rejects_cpu_only_handle(fake_cutlass):
+    fake_cutlass.has_gpu_module = False
+
+    with pytest.raises(ValueError, match="requires a CUDA CuTe DSL function"):
+        cutlass.compile_to_object(lambda: None)
+
+    assert all(call[0] != "dump_to_object" for call in fake_cutlass.calls)

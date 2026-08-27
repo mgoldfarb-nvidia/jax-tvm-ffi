@@ -3,10 +3,10 @@
 """JAX integration for serialized CuTe DSL softmax kernels.
 
 Unlike ``jax_softmax``, this example does not keep a process-global TVM FFI
-function registration. It compiles each function to an in-memory object artifact
-and embeds those bytes in the StableHLO custom call. JAX TVM FFI weakly interns
-each ORCJIT module by object SHA-256; live executables own the shared module and
-resolve its TVM FFI exports.
+function registration. It dumps each legacy compiled handle to in-memory
+object bytes and embeds them in the StableHLO custom call. JAX TVM FFI weakly
+interns each ORCJIT module by object SHA-256; live executables own the shared
+module and resolve its TVM FFI exports.
 
 Usage:
     python -m examples.cutedsl.jax_softmax_serialized

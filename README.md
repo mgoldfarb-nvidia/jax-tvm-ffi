@@ -113,17 +113,16 @@ platform initializes that JAX backend to satisfy state-type registration
 ordering. Complete `jax.distributed.initialize()` and other backend
 configuration before constructing these calls.
 
-CUTLASS DSL users can obtain the object bytes, exported name, and SHA-256
-digest with `jax_tvm_ffi.cutlass.compile_to_object`. Object compilation uses a
-bounded in-process cache keyed by precompiled artifact, target, and lowering
-options; pass `no_cache=True` to force recompilation. This serialized CuTe path
-requires the coordinated unreleased compiler change that makes CUDA TVM-FFI
-objects own their lazy initialization and teardown automatically; the public
-4.6 release does not contain it. Until that change is released, use a DKG source
-build. The helper loads the CuTe runtime libraries with process-global symbol
-visibility and retains them for module teardown. A process that consumes an
-already-serialized executable without recompiling must call
-`jax_tvm_ffi.cutlass.load_runtime()` first.
+CUTLASS DSL users can obtain CUDA object bytes, an exported name, and a SHA-256
+digest with `jax_tvm_ffi.cutlass.compile_to_object`. The helper uses the
+established `cute.compile[EnableTVMFFI]` path, then asks the returned compiled
+handle for its object bytes. This serialized CuTe path requires the coordinated
+CuTe DSL change that adds object dumping and exports `__tvm_ffi_module_init`
+while retaining the kernel's lazy CUDA initialization. Until that change is
+released, use a DKG source build. The helper loads the CuTe runtime libraries
+with process-global symbol visibility and retains them for module teardown. A
+process that consumes an already-serialized executable without recompiling
+must call `jax_tvm_ffi.cutlass.load_runtime()` first.
 
 ```python
 from jax_tvm_ffi.cutlass import compile_to_object
@@ -131,7 +130,7 @@ from jax_tvm_ffi.cutlass import compile_to_object
 serialized_function = compile_to_object(
     kernel,
     *compile_args,
-    compile_options={"preserve-line-info": "true"},
+    compile_options="--preserve-line-info --opt-level 2",
 )
 call = jax_tvm_ffi.ffi_call_from_serialized(
     serialized_function,
@@ -144,8 +143,9 @@ result = jax.jit(lambda x: call(x, scale=scale))(input)
 ```
 
 The object contains a TVM-FFI host export that lazily initializes and unloads
-its embedded device code, such as a CUBIN. On Linux this is an ELF relocatable
-object; ORCJIT also accepts the native object format on macOS and Windows.
+its embedded device code, such as a CUBIN, plus the explicit
+`__tvm_ffi_module_init` entry. On Linux this is an ELF relocatable object;
+ORCJIT also accepts the native object format on macOS and Windows.
 `ffi_call_from_payload` remains
 available for other serialized formats through a registered loader with
 signature `(Bytes) -> Module`. Call `clear_payload_module_cache()` to invalidate
