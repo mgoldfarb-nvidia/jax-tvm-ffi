@@ -19,7 +19,7 @@ pip install -e ".[cutedsl]"
 
 Or install dependencies separately:
 ```bash
-pip install -e . "nvidia-cutlass-dsl==4.9.0.dev1"
+pip install -e . "nvidia-cutlass-dsl>=4.9.0.dev1"
 ```
 
 ## Quick Start
@@ -36,8 +36,8 @@ pip install -e ".[cutedsl,orcjit]"
 python -m examples.cutedsl.jax_softmax_serialized
 ```
 
-CuTe DSL 4.9.0.dev1 and ORCJIT 0.1.3 are published on PyPI. The CuTe release lets
-a CUDA TVM-FFI compiled handle dump itself to object bytes. The object
+CuTe DSL 4.9.0.dev1 or newer can dump a CUDA TVM-FFI compiled handle to object
+bytes, which ORCJIT 0.1.3 loads. The object
 preserves the kernel's lazy CUDA initialization and exports
 `__tvm_ffi_module_init` for explicit initialization.
 
@@ -110,7 +110,7 @@ consumer path recompiles the CuTe kernel. The `jax.export` path still compiles
 the surrounding JAX computation with XLA before execution.
 
 Both processes require a CUDA-enabled JAX installation, this branch of
-`jax-tvm-ffi`, ORCJIT, and the CuTe runtime libraries supplied by the pinned CuTe
+`jax-tvm-ffi`, ORCJIT, and the CuTe runtime libraries supplied by the installed CuTe
 package. The producer also needs the kernel source and CuTe compiler. Use
 compatible host and GPU architectures and runtime libraries: embedding native
 object bytes restricts the export's portability. For the experimental AOT

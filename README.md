@@ -108,13 +108,13 @@ provides separate producer and consumer scripts for both artifact formats:
 | `jax.export` program | Compile the exported StableHLO with XLA; reuse the embedded CuTe object. |
 | Serialized AOT executable | Load the compiled executable directly; reuse the embedded CuTe object. |
 
-Install this branch with CuTe DSL 4.9.0.dev1 and the ORCJIT 0.1.3 loader:
+Install this branch with CuTe DSL 4.9.0.dev1 or newer and the ORCJIT 0.1.3 loader:
 
 ```bash
 pip install -e ".[cutedsl,orcjit]"
 ```
 
-Both versions are published on PyPI and pinned by the extras.
+The CuTe DSL extra requires `nvidia-cutlass-dsl>=4.9.0.dev1`; ORCJIT is pinned to 0.1.3.
 With uv, use `uv sync --extra cutedsl --extra orcjit --prerelease allow` to
 enable CuTe DSL's transitive development dependencies.
 
