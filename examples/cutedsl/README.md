@@ -139,6 +139,19 @@ if len(devices) >= 2:
     )(x_sharded)
 ```
 
+## Tests
+
+With CUDA-enabled JAX installed, run from the repository root:
+
+```bash
+pip install -e ".[cutedsl,orcjit]" pytest flatbuffers
+JAX_PLATFORMS=cuda,cpu python -m pytest -q tests/test_cutlass.py
+```
+
+These tests compile and execute real CuTe kernels and exercise JAX export and
+AOT executable round trips. They skip when a GPU or required optional
+dependencies are unavailable.
+
 ## Files
 
 | File | Description |
