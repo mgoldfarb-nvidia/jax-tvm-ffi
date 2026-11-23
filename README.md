@@ -139,10 +139,11 @@ CUTLASS DSL users can obtain CUDA object bytes and an exported name with
 `cute.compile[EnableTVMFFI]`, then asks the returned compiled handle for its
 object bytes. CuTe DSL 4.9.0.dev1 includes object dumping and exports
 `__tvm_ffi_module_init` while retaining the kernel's lazy CUDA initialization.
-The helper loads the CuTe runtime libraries with process-global symbol
-visibility and retains them for module teardown. A process that consumes an
-already-serialized executable without recompiling must call
-`jax_tvm_ffi.cutlass.load_runtime()` first.
+CuTe sets up its runtime during compilation. A fresh process that consumes a
+previously serialized artifact must explicitly call
+`jax_tvm_ffi.cutlass.load_runtime()` first. This loads the CuTe runtime libraries
+with process-global symbol visibility for ORCJIT and retains them for module
+teardown.
 
 ```python
 from jax_tvm_ffi.cutlass import compile_to_object

@@ -91,12 +91,6 @@ def test_compile_to_object_dumps_tvm_ffi_compiled_handle(fake_cutlass, cutedsl_v
         function_name="softmax",
     )
     assert fake_cutlass.calls == [
-        ("find_runtime_libraries", False),
-        (
-            "load_runtime",
-            "/fake/libcute_dsl_runtime.so",
-            getattr(cutlass.os, "RTLD_NOW", 0) | getattr(cutlass.os, "RTLD_GLOBAL", 0),
-        ),
         ("compile_option", fake_cutlass.enable_tvm_ffi),
         (
             "compile",
@@ -128,17 +122,31 @@ def test_compile_to_object_appends_custom_options(fake_cutlass):
     )
 
 
-def test_compile_to_object_loads_runtime_once_without_compilation_cache(fake_cutlass):
+def test_compile_to_object_does_not_load_runtime_or_cache_compilation(fake_cutlass):
     function = lambda: None
 
     cutlass.compile_to_object(function)
     cutlass.compile_to_object(function)
 
     call_names = [call[0] for call in fake_cutlass.calls]
-    assert call_names.count("find_runtime_libraries") == 1
-    assert call_names.count("load_runtime") == 1
+    assert "find_runtime_libraries" not in call_names
+    assert "load_runtime" not in call_names
     assert call_names.count("compile") == 2
     assert call_names.count("dump_to_object") == 2
+
+
+def test_load_runtime_is_idempotent(fake_cutlass):
+    cutlass.load_runtime()
+    cutlass.load_runtime()
+
+    assert fake_cutlass.calls == [
+        ("find_runtime_libraries", False),
+        (
+            "load_runtime",
+            "/fake/libcute_dsl_runtime.so",
+            getattr(cutlass.os, "RTLD_NOW", 0) | getattr(cutlass.os, "RTLD_GLOBAL", 0),
+        ),
+    ]
 
 
 def test_compile_to_object_propagates_dump_failure(fake_cutlass):

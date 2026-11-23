@@ -50,11 +50,10 @@ loads a module and retains it for the executable's lifetime. The
 reusable entry point is `jax_tvm_ffi.cutlass.compile_to_object`. Pass additional
 compiler flags in the `compile_options` string; they are appended after
 the helper's defaults and can override them. The helper always adds
-`--enable-tvm-ffi`. It also loads the installed CuTe runtime libraries with
-process-global visibility so ORCJIT can resolve the object's runtime symbols;
-call
-`jax_tvm_ffi.cutlass.load_runtime()` when loading a previously serialized JAX
-executable in a fresh process without recompiling the kernel first.
+`--enable-tvm-ffi`. CuTe sets up its runtime during compilation. When loading a
+previously serialized artifact in a fresh process, explicitly call
+`jax_tvm_ffi.cutlass.load_runtime()` to make the runtime symbols available to
+ORCJIT.
 
 Call `jax_tvm_ffi.register_builtin_targets(platform="gpu")` during application
 setup before compiling or loading payload-backed computations. The call

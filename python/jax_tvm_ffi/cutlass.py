@@ -20,8 +20,9 @@ _RUNTIME_LIBRARY_HANDLES: dict[str, ctypes.CDLL] = {}
 
 
 def load_runtime() -> None:
-    """Load CUTLASS DSL runtime libraries for ORCJIT symbol resolution.
+    """Load CUTLASS DSL runtime libraries before restoring serialized objects.
 
+    Call this in a fresh process that loads objects without compiling them first.
     The handles remain alive for the process lifetime because serialized
     modules can run destructors after their last JAX executable is released.
     """
@@ -71,9 +72,8 @@ def compile_to_object(
 
     Notes:
         This helper enables TVM FFI and serializes the compiled handle with
-        its module initializer.
-        Runtime libraries are loaded globally so ORCJIT can resolve the
-        object's host-runtime symbols.
+        its module initializer. CuTe manages runtime libraries during compilation.
+        A fresh process loading the serialized object must call :func:`load_runtime`.
     """
     try:
         cutedsl_version = version("nvidia-cutlass-dsl")
@@ -96,7 +96,6 @@ def compile_to_object(
         options.append(compile_options)
 
     with _COMPILE_LOCK:
-        load_runtime()
         compiled = cute.compile[cutlass_dsl.EnableTVMFFI](
             function,
             *compile_args,
