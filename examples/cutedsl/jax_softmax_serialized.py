@@ -11,6 +11,7 @@ Usage:
     python -m examples.cutedsl.jax_softmax_serialized
 """
 
+import argparse
 from collections.abc import Callable
 
 import cutlass
@@ -48,7 +49,9 @@ def _compile_softmax_backward_object(
     return compile_to_object(SoftmaxBackward(dtype, N), example_dy, example_y, example_dx)
 
 
-def make_softmax(N: int, dtype: DType = jnp.bfloat16) -> Callable[[Array], Array]:
+def make_softmax(
+    N: int, dtype: DType = jnp.bfloat16, *, allow_cuda_graph: bool = False
+) -> Callable[[Array], Array]:
     """Compile a softmax callable for two-dimensional arrays of shape ``(M, N)``."""
     dtype = jnp.dtype(dtype)
     cutlass_dtype = _get_cutlass_dtype(dtype)
@@ -65,6 +68,7 @@ def make_softmax(N: int, dtype: DType = jnp.bfloat16) -> Callable[[Array], Array
             forward,
             jax.ShapeDtypeStruct(x.shape, x.dtype),
             platform="gpu",
+            allow_cuda_graph=allow_cuda_graph,
             arg_spec=("args", "rets"),
             vmap_method="broadcast_all",
         )
@@ -79,6 +83,7 @@ def make_softmax(N: int, dtype: DType = jnp.bfloat16) -> Callable[[Array], Array
             backward,
             jax.ShapeDtypeStruct(g.shape, g.dtype),
             platform="gpu",
+            allow_cuda_graph=allow_cuda_graph,
             arg_spec=("args", "rets"),
             vmap_method="broadcast_all",
         )
@@ -90,6 +95,9 @@ def make_softmax(N: int, dtype: DType = jnp.bfloat16) -> Callable[[Array], Array
 
 def main() -> None:
     """Demonstrate serialized CuTe DSL softmax integration with JAX."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allow-cuda-graph", action="store_true")
+    args = parser.parse_args()
     jax_tvm_ffi.register_builtin_targets(platform="gpu")
     print("=" * 60)
     print("Serialized CuTe DSL Softmax + JAX Integration Demo")
@@ -99,19 +107,24 @@ def main() -> None:
     print(f"\nConfig: N={N}, dtype={dtype}")
 
     print("\n[1] Compiling and serializing CuTe DSL kernels...")
-    softmax = make_softmax(N=N, dtype=dtype)
+    softmax = make_softmax(N=N, dtype=dtype, allow_cuda_graph=args.allow_cuda_graph)
     print("    Done!")
 
     print("\n[2] Testing JIT compilation...")
     x = jax.random.normal(jax.random.key(42), (32, N), dtype=dtype)
-    y = jax.jit(softmax)(x)
+    softmax_jit = jax.jit(softmax)
     y_ref = jax.nn.softmax(x, axis=-1)
-    max_diff = float(jnp.abs(y - y_ref).max())
-    assert max_diff < 1e-3, f"JIT failed: max_diff={max_diff}"
+    # XLA warms up once before capture; exercise capture and replay as well.
+    for _ in range(3):
+        y = softmax_jit(x)
+        max_diff = float(jnp.abs(y - y_ref).max())
+        assert max_diff < 1e-3, f"JIT failed: max_diff={max_diff}"
     print(f"    PASS (max_diff={max_diff:.2e})")
 
     print("\n[3] Testing autodiff (jax.grad)...")
-    dx = jax.grad(lambda value: softmax(value).sum())(x)
+    backward_jit = jax.jit(jax.grad(lambda value: softmax(value).sum()))
+    for _ in range(3):
+        dx = backward_jit(x).block_until_ready()
     print(f"    PASS (dx shape={dx.shape})")
 
     print("\n[4] Testing shard_map...")

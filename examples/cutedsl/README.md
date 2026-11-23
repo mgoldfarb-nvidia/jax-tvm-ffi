@@ -80,6 +80,10 @@ pip install -e ".[cutedsl,orcjit]"
 python -m examples.cutedsl.export_softmax /tmp/softmax-artifacts --format executable
 ```
 
+Add `--allow-cuda-graph` to the producer command to select the graph-compatible
+target. The selected target is preserved in both artifact formats; consumer
+commands are the same. JAX export allows the selected target explicitly.
+
 Run each consumer command in a new process:
 
 ```bash
@@ -133,6 +137,10 @@ x = jax.random.normal(jax.random.key(0), (32, 1024), dtype=jnp.bfloat16)
 y = jax.jit(softmax)(x)
 ```
 
+Use `make_softmax(..., allow_cuda_graph=True)` to allow XLA to capture the
+forward and backward calls in CUDA graphs. The command-line example accepts
+`--allow-cuda-graph` too. Capture remains subject to XLA's command-buffer settings.
+
 ### Registered kernels
 
 ```python
@@ -182,6 +190,7 @@ These tests compile and execute real CuTe kernels and exercise JAX export and
 AOT executable round trips. They skip when a GPU or required optional
 dependencies are unavailable. Install `flatbuffers` to include the JAX export
 test; compile-and-run and serialized-executable tests do not require it.
+Each flow is tested with CUDA graph capture enabled and disabled.
 
 ## Files
 

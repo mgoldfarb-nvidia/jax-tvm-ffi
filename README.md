@@ -134,10 +134,27 @@ For standalone C++ objects on Linux AArch64, compile with
 
 Call `jax_tvm_ffi.register_builtin_targets(platform="gpu")` in each process
 before compiling or loading a payload-backed computation. It registers the
-state type and target through JAX's FFI registration APIs.
+state type and both targets through JAX's FFI registration APIs.
 Registration does not initialize a JAX backend and can run before
 `jax.distributed.initialize()` or backend configuration. The call factories
 only construct calls and can be used before registration.
+
+The call factories accept `allow_cuda_graph=False` by default:
+
+| `allow_cuda_graph` | Predefined target | Behavior |
+|---|---|---|
+| `False` | `jax_tvm_ffi.payload_call` | Executes outside CUDA graphs. |
+| `True` | `jax_tvm_ffi.payload_call_cuda_graph` | Eligible for CUDA graph capture and replay. |
+
+Opt in only when the loaded function supports capture and replay on XLA's
+CUDA stream. Its device operations must be repeatable, and input buffers may
+be uninitialized during capture. XLA's command-buffer settings determine
+whether eligible calls are captured.
+
+The target name preserves this choice in exported programs and AOT executables.
+For JAX export, pass the selected name to
+`jax.export.DisabledSafetyCheck.custom_call`. Consumers register both targets
+with the same `register_builtin_targets()` call.
 
 CUTLASS DSL users can obtain CUDA object bytes and an exported name with
 `jax_tvm_ffi.cutlass.compile_to_object`. The helper uses
@@ -212,8 +229,9 @@ must support the object's native architecture and runtime dependencies.
 `register_builtin_targets` is idempotent and does not initialize a backend.
 For custom payload formats, register their TVM global loader in place of importing
 `tvm_ffi_orcjit`. For `jax.export`, pass
-`jax.export.DisabledSafetyCheck.custom_call("jax_tvm_ffi.payload_call")` through
-`export`'s `disabled_checks` argument and initialize the consumer the same way.
+`jax.export.DisabledSafetyCheck.custom_call(target_name)` through `export`'s
+`disabled_checks` argument, using the selected target from the table above,
+and initialize the consumer the same way.
 
 ### Python Callback
 

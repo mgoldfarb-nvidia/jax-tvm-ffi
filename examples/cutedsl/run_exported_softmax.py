@@ -36,10 +36,13 @@ def main() -> None:
             )
 
     x = np.random.default_rng(0).standard_normal((32, 1024)).astype(np.float32)
-    actual = np.asarray(compiled(jax.device_put(x, gpu)))
+    device_x = jax.device_put(x, gpu)
     exp_x = np.exp(x - x.max(axis=-1, keepdims=True))
     expected = exp_x / exp_x.sum(axis=-1, keepdims=True)
-    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+    # XLA warms up once before capture; exercise capture and replay as well.
+    for _ in range(3):
+        actual = np.asarray(compiled(device_x))
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
     print(f"PASS: {args.format} softmax matches the NumPy reference")
 
 

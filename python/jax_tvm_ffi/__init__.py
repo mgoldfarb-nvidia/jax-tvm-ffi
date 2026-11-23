@@ -39,6 +39,7 @@ def _load_lib() -> tvm_ffi.Module:
 _LIB = _load_lib()
 
 _PAYLOAD_TARGET = "jax_tvm_ffi.payload_call"
+_PAYLOAD_CUDA_GRAPH_TARGET = "jax_tvm_ffi.payload_call_cuda_graph"
 _ORCJIT_OBJECT_LOADER = "jax_tvm_ffi.LoadOrcjitObjectModule"
 _ORCJIT_REQUIRED_GLOBALS = (
     "tvm_ffi_orcjit.GlobalDefaultSession",
@@ -104,11 +105,12 @@ def register_builtin_targets(platform: str = "gpu") -> str:
 
     Call this during process setup before compiling payload-backed calls,
     deserializing a compiled executable, or calling a deserialized JAX export.
-    It registers the bridge and its state type without requiring the original
-    object bytes or Python callable.
+    It registers both the default and CUDA graph-compatible targets and their
+    shared state type without requiring the original object bytes or Python callable.
     Only CUDA GPUs (``platform="gpu"``) are supported. Repeated registration is safe.
-    Returns the target name, which can also be used with
-    ``jax.export.DisabledSafetyCheck.custom_call``.
+    Returns the default target name, which can also be used with
+    ``jax.export.DisabledSafetyCheck.custom_call``. Calls with ``allow_cuda_graph=True``
+    use ``jax_tvm_ffi.payload_call_cuda_graph`` instead.
 
     Import ``tvm_ffi_orcjit`` before loading object-backed executables. For a
     custom payload format, register its TVM global loader instead. Load any
@@ -132,14 +134,20 @@ def register_builtin_targets(platform: str = "gpu") -> str:
             },
             platform=platform,
         )
-        jax.ffi.register_ffi_target(
-            target,
-            {
-                "instantiate": jax.ffi.pycapsule(_LIB.payload_call_instantiate_handler()),
-                "execute": jax.ffi.pycapsule(_LIB.payload_call_execute_handler()),
-            },
-            platform=platform,
-        )
+        for target_name, allow_cuda_graph in (
+            (_PAYLOAD_TARGET, False),
+            (_PAYLOAD_CUDA_GRAPH_TARGET, True),
+        ):
+            jax.ffi.register_ffi_target(
+                target_name,
+                {
+                    "instantiate": jax.ffi.pycapsule(_LIB.payload_call_instantiate_handler()),
+                    "execute": jax.ffi.pycapsule(
+                        _LIB.payload_call_execute_handler(allow_cuda_graph)
+                    ),
+                },
+                platform=platform,
+            )
         _registered_payload_targets.add(platform)
     return target
 
@@ -173,6 +181,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
     result_shape_dtypes: Any,
     *,
     platform: str = "gpu",
+    allow_cuda_graph: bool = False,
     arg_spec: Sequence[str] | None = None,
     workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
@@ -195,6 +204,11 @@ def ffi_call_from_payload(  # noqa: PLR0913
     Workspace buffers are appended to the custom call outputs, hidden from the
     returned JAX value, and passed to the loaded function as opaque pointers
     after its ordinary tensor arguments and results.
+
+    ``allow_cuda_graph=True`` selects the CUDA graph-compatible target. The
+    function must safely capture and replay its device operations on the supplied
+    stream; capture may receive uninitialized input buffers. The default target
+    runs outside CUDA graphs.
 
     Only CUDA GPUs (``platform="gpu"``) are supported. Call
     :func:`register_builtin_targets` during process setup before compiling or
@@ -226,7 +240,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
         all_output_layouts = (*output_layouts, *((0,) for _ in workspaces))
 
     call = jax.ffi.ffi_call(
-        _PAYLOAD_TARGET,
+        _PAYLOAD_CUDA_GRAPH_TARGET if allow_cuda_graph else _PAYLOAD_TARGET,
         all_results,
         vmap_method=vmap_method,
         input_layouts=input_layouts,
@@ -275,12 +289,13 @@ def _require_orcjit() -> None:
         )
 
 
-def ffi_call_from_object(
+def ffi_call_from_object(  # noqa: PLR0913
     object_bytes: bytes,
     function_name: str,
     result_shape_dtypes: Any,
     *,
     platform: str = "gpu",
+    allow_cuda_graph: bool = False,
     arg_spec: Sequence[str] | None = None,
     workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
@@ -294,6 +309,9 @@ def ffi_call_from_object(
     At custom-call instantiation, TVM-FFI ORCJIT loads them from memory and the
     bridge resolves ``function_name``. The call state retains the module and
     function for the executable's lifetime.
+
+    Set ``allow_cuda_graph=True`` for functions that support CUDA graph capture
+    and replay. See :func:`ffi_call_from_payload` for the capture requirements.
 
     Only CUDA GPUs (``platform="gpu"``) are supported. Call
     :func:`register_builtin_targets` during process setup before compiling or
@@ -310,6 +328,7 @@ def ffi_call_from_object(
         function_name,
         result_shape_dtypes,
         platform=platform,
+        allow_cuda_graph=allow_cuda_graph,
         arg_spec=arg_spec,
         workspaces=workspaces,
         vmap_method=vmap_method,
@@ -324,6 +343,7 @@ def ffi_call_from_serialized(
     result_shape_dtypes: Any,
     *,
     platform: str = "gpu",
+    allow_cuda_graph: bool = False,
     arg_spec: Sequence[str] | None = None,
     workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
@@ -337,6 +357,9 @@ def ffi_call_from_serialized(
     results. It passes the object's bytes and exported function name to
     :func:`ffi_call_from_object`.
 
+    Set ``allow_cuda_graph=True`` for functions that support CUDA graph capture
+    and replay. See :func:`ffi_call_from_payload` for the capture requirements.
+
     Only CUDA GPUs (``platform="gpu"``) are supported. Call
     :func:`register_builtin_targets` during process setup before compiling or
     executing the call.
@@ -348,6 +371,7 @@ def ffi_call_from_serialized(
         serialized_function.function_name,
         result_shape_dtypes,
         platform=platform,
+        allow_cuda_graph=allow_cuda_graph,
         arg_spec=arg_spec,
         workspaces=workspaces,
         vmap_method=vmap_method,

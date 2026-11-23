@@ -1230,6 +1230,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(JAXTVMFFIGpuPayloadCallInstantiate, InstantiatePay
 
 class PayloadExecuteHandler : public xla::ffi::Ffi {
  public:
+  explicit PayloadExecuteHandler(XLA_FFI_Handler_Traits traits) : traits_(traits) {}
+
   XLA_FFI_Error* Call(XLA_FFI_CallFrame* call_frame) const final {
     if (XLA_FFI_Error* error =
             CheckStructSize(call_frame->api, "XLA_FFI_CallFrame", XLA_FFI_CallFrame_STRUCT_SIZE,
@@ -1283,14 +1285,21 @@ class PayloadExecuteHandler : public xla::ffi::Ffi {
         XLA_FFI_API_MAJOR,
         XLA_FFI_API_MINOR,
     };
-    extension->metadata->traits = 0;
+    extension->metadata->traits = traits_;
     extension->metadata->state_type_id = XLA_FFI_UNKNOWN_TYPE_ID;
     return nullptr;
   }
+
+  const XLA_FFI_Handler_Traits traits_;
 };
 
 extern "C" XLA_FFI_Error* JAXTVMFFIGpuPayloadCallExecute(XLA_FFI_CallFrame* call_frame) {
-  static const PayloadExecuteHandler handler;
+  static const PayloadExecuteHandler handler(/*traits=*/0);
+  return handler.Call(call_frame);
+}
+
+extern "C" XLA_FFI_Error* JAXTVMFFIGpuPayloadCallExecuteCudaGraph(XLA_FFI_CallFrame* call_frame) {
+  static const PayloadExecuteHandler handler(XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE);
   return handler.Call(call_frame);
 }
 
@@ -1298,8 +1307,9 @@ void* PayloadCallInstantiateHandler() {
   return reinterpret_cast<void*>(&JAXTVMFFIGpuPayloadCallInstantiate);
 }
 
-void* PayloadCallExecuteHandler() {
-  return reinterpret_cast<void*>(&JAXTVMFFIGpuPayloadCallExecute);
+void* PayloadCallExecuteHandler(bool allow_cuda_graph) {
+  return reinterpret_cast<void*>(allow_cuda_graph ? &JAXTVMFFIGpuPayloadCallExecuteCudaGraph
+                                                  : &JAXTVMFFIGpuPayloadCallExecute);
 }
 
 void* PayloadCallStateTypeId() { return &PayloadCallState::id; }

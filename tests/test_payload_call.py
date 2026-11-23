@@ -50,8 +50,16 @@ _PAYLOAD_CUDA_SOURCE = r"""
                   tvm::ffi::TensorView x, int64_t stream, void* workspace) {
       add(-decrement.cast<int64_t>(), y, x, stream, workspace);
     }
+
+    void capture_status(tvm::ffi::TensorView output, int64_t stream) {
+      auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+      cudaStreamCaptureStatus status;
+      TVM_FFI_ICHECK_EQ(cudaStreamIsCapturing(cuda_stream, &status), cudaSuccess);
+      TVM_FFI_ICHECK_EQ(cudaMemsetAsync(output.data_ptr(), status == cudaStreamCaptureStatusActive,
+                                       1, cuda_stream), cudaSuccess);
+    }
 """
-_PAYLOAD_FUNCTIONS = ("add", "subtract")
+_PAYLOAD_FUNCTIONS = ("add", "subtract", "capture_status")
 
 
 @requires_gpu
@@ -252,17 +260,55 @@ def test_object_call_loads_orcjit_object(payload_target, object_bytes):
 
 
 @requires_gpu
+@pytest.mark.parametrize("allow_cuda_graph", [False, True])
+def test_payload_cuda_graph_is_opt_in(payload_target, payload_module, request, allow_cuda_graph):
+    loader_name = "jax_tvm_ffi_test.LoadCaptureStatusModule"
+
+    @tvm_ffi.register_global_func(loader_name)
+    def load_module(payload_bytes):
+        assert bytes(payload_bytes) == b"capture-status"
+        return payload_module
+
+    request.addfinalizer(lambda: tvm_ffi.remove_global_func(loader_name))
+    call = jax_tvm_ffi.ffi_call_from_payload(
+        b"capture-status",
+        loader_name,
+        "capture_status",
+        jax.ShapeDtypeStruct((1,), jnp.uint8),
+        platform="gpu",
+        arg_spec=("rets", "ctx.stream"),
+        **({"allow_cuda_graph": True} if allow_cuda_graph else {}),
+    )
+    compiled = (
+        jax.jit(call, out_shardings=jax.sharding.SingleDeviceSharding(jax.devices("gpu")[0]))
+        .lower()
+        .compile(
+            compiler_options={
+                "xla_gpu_enable_command_buffer": "CUSTOM_CALL",
+                "xla_gpu_graph_min_graph_size": 1,
+            }
+        )
+    )
+
+    # XLA runs custom calls once outside capture to initialize their runtime state.
+    compiled().block_until_ready()
+    for _ in range(2):
+        assert numpy.asarray(compiled()).item() == int(allow_cuda_graph)
+
+
+@requires_gpu
+@pytest.mark.parametrize("allow_cuda_graph", [False, True])
 @pytest.mark.parametrize("artifact_format", ["export", "executable"])
 def test_object_round_trip_in_fresh_process(
-    payload_target, object_bytes, cuda_runtime, tmp_path, artifact_format
+    payload_target, object_bytes, cuda_runtime, tmp_path, artifact_format, allow_cuda_graph
 ):
-    call = jax_tvm_ffi.ffi_call_from_object(
-        object_bytes,
-        "add",
+    call = jax_tvm_ffi.ffi_call_from_serialized(
+        jax_tvm_ffi.SerializedFunction(object_bytes, "add"),
         jax.ShapeDtypeStruct((8,), jnp.float32),
         platform="gpu",
         arg_spec=("attrs.increment", "rets", "args", "ctx.stream"),
         workspaces=(jax_tvm_ffi.Workspace(64),),
+        allow_cuda_graph=allow_cuda_graph,
     )
     input_spec = jax.ShapeDtypeStruct(
         (8,), jnp.float32, sharding=jax.sharding.SingleDeviceSharding(jax.devices("gpu")[0])
@@ -271,10 +317,11 @@ def test_object_round_trip_in_fresh_process(
     artifact_path = tmp_path / "artifact"
     if artifact_format == "export":
         pytest.importorskip("flatbuffers")
+        target = payload_target + ("_cuda_graph" if allow_cuda_graph else "")
         exported = export.export(
             add_two,
             platforms=("cuda",),
-            disabled_checks=(export.DisabledSafetyCheck.custom_call(payload_target),),
+            disabled_checks=(export.DisabledSafetyCheck.custom_call(target),),
         )(input_spec)
         artifact_path.write_bytes(exported.serialize())
     else:
