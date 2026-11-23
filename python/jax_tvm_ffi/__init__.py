@@ -100,13 +100,13 @@ def _get_dl_device_type(platform: str) -> int:
 
 
 def register_builtin_targets(platform: str = "gpu") -> str:
-    """Register the built-in FFI targets for the selected platform.
+    """Register the built-in GPU FFI targets and their state types.
 
     Call this during process setup before compiling payload-backed calls,
     deserializing a compiled executable, or calling a deserialized JAX export.
     It registers the bridge and its state type without requiring the original
     object bytes or Python callable.
-    Repeated registration for the same platform is safe. Returns the target
+    Only ``platform="gpu"`` is supported. Repeated registration is safe. Returns the target
     name, which can also be used with ``jax.export.DisabledSafetyCheck.custom_call``.
 
     Import ``tvm_ffi_orcjit`` before loading object-backed executables. For a
@@ -116,19 +116,26 @@ def register_builtin_targets(platform: str = "gpu") -> str:
     This does not initialize a JAX backend and can be called before distributed
     initialization or backend configuration.
     """
-    device_type = int(_get_dl_device_type(platform))
+    if platform != "gpu":
+        raise ValueError("Payload-backed calls only support platform='gpu'")
     target = _PAYLOAD_TARGET
     with _payload_registration_lock:
         if platform in _registered_payload_targets:
             return target
 
+        jax.ffi.register_ffi_type(
+            f"jax_tvm_ffi.payload_call_state.{platform}",
+            {
+                "type_id": jax.ffi.pycapsule(_LIB.payload_call_state_type_id()),
+                "type_info": jax.ffi.pycapsule(_LIB.payload_call_state_type_info()),
+            },
+            platform=platform,
+        )
         jax.ffi.register_ffi_target(
             target,
             {
-                "instantiate": jax.ffi.pycapsule(
-                    _LIB.payload_call_instantiate_handler(device_type)
-                ),
-                "execute": jax.ffi.pycapsule(_LIB.payload_call_execute_handler(device_type)),
+                "instantiate": jax.ffi.pycapsule(_LIB.payload_call_instantiate_handler()),
+                "execute": jax.ffi.pycapsule(_LIB.payload_call_execute_handler()),
             },
             platform=platform,
         )
@@ -172,7 +179,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
     output_layouts: Sequence[Any] | None = None,
     input_output_aliases: dict[int, int] | None = None,
 ) -> Callable[..., Any]:
-    """Build a JAX FFI call whose executable owns its compiled payload.
+    """Build a GPU JAX FFI call whose executable owns its compiled payload.
 
     ``payload_loader`` names a registered TVM global function with signature
     ``(Bytes) -> Module``. Each custom-call instantiation loads a module and
@@ -188,10 +195,12 @@ def ffi_call_from_payload(  # noqa: PLR0913
     returned JAX value, and passed to the loaded function as opaque pointers
     after its ordinary tensor arguments and results.
 
-    Call :func:`register_builtin_targets` for the selected platform during process
+    Only ``platform="gpu"`` is supported. Call :func:`register_builtin_targets` during process
     setup before compiling or executing the call. Constructing the call does not
     register the target or initialize a JAX backend.
     """
+    if platform != "gpu":
+        raise ValueError("Payload-backed calls only support platform='gpu'")
     if not isinstance(payload, bytes) or not payload:
         raise ValueError("payload must be nonempty bytes")
     if not payload_loader:
@@ -287,6 +296,8 @@ def ffi_call_from_object(
     Call :func:`register_builtin_targets` during process setup before compiling
     or executing the call.
     """
+    if platform != "gpu":
+        raise ValueError("Payload-backed calls only support platform='gpu'")
     _require_orcjit()
     if not isinstance(object_bytes, bytes) or not object_bytes:
         raise ValueError("object_bytes must be nonempty bytes")

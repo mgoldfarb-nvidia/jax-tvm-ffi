@@ -96,7 +96,8 @@ result = jax.ffi.ffi_call("my.function", output_shape)(x, y, eps=1e-5)
 Export and ahead-of-time deployment are the main use case: compile the TVM-FFI
 kernel in a producer process, embed its object bytes in the JAX artifact, and
 load it in a consumer without the original kernel source or per-function
-registration. The [CuTe export/AOT example](examples/cutedsl/README.md#export-and-aot-deployment)
+registration. Built-in payload-backed calls support CUDA GPUs.
+The [CuTe export/AOT example](examples/cutedsl/README.md#export-and-aot-deployment)
 provides separate producer and consumer scripts for both artifact formats:
 
 | Artifact | Consumer behavior |
@@ -128,8 +129,9 @@ the Python wrapper's compiler-specific runtime discovery.
 For standalone C++ objects on Linux AArch64, compile with
 `-mno-outline-atomics` to avoid dependencies on libgcc's non-exported atomic helpers.
 
-Call `jax_tvm_ffi.register_builtin_targets(platform=...)` once per platform in
-each process before compiling or loading a payload-backed computation.
+Call `jax_tvm_ffi.register_builtin_targets(platform="gpu")` in each process
+before compiling or loading a payload-backed computation. It registers the
+state type and target through JAX's FFI registration APIs.
 Registration does not initialize a JAX backend and can run before
 `jax.distributed.initialize()` or backend configuration. The call factories
 only construct calls and can be used before registration.
@@ -166,8 +168,7 @@ result = jax.jit(lambda x: call(x, scale=scale))(input)
 
 The object contains a TVM-FFI host export that lazily initializes and unloads
 its embedded device code, such as a CUBIN, plus the explicit
-`__tvm_ffi_module_init` entry. On Linux this is an ELF relocatable object;
-ORCJIT also accepts the native object format on macOS and Windows.
+`__tvm_ffi_module_init` entry. On Linux this is an ELF relocatable object.
 `ffi_call_from_payload` remains
 available for other serialized formats through a registered loader with
 signature `(Bytes) -> Module`.
