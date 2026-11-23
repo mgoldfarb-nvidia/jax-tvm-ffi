@@ -12,7 +12,7 @@ import jax_tvm_ffi
 from jax import export
 from jax.experimental import serialize_executable
 
-from .jax_softmax_serialized import register_softmax_ops, softmax
+from .jax_softmax_serialized import make_softmax
 
 
 def main() -> None:
@@ -23,7 +23,7 @@ def main() -> None:
     target = jax_tvm_ffi.register_builtin_targets(platform="gpu")
     gpu = jax.devices("gpu")[0]
     with jax.default_device(gpu):
-        register_softmax_ops(N=1024, dtype=jnp.float32)
+        softmax = make_softmax(N=1024, dtype=jnp.float32)
         input_spec = jax.ShapeDtypeStruct((32, 1024), jnp.float32)
         softmax_jit = jax.jit(softmax)
         exported = export.export(

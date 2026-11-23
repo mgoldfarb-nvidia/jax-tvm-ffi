@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """JAX integration for serialized CuTe DSL softmax kernels.
 
-Unlike ``jax_softmax``, this example does not keep a process-global TVM FFI
-function registration. It dumps each TVM FFI compiled handle to in-memory
-object bytes and embeds them in the StableHLO custom call. Each custom-call
+``make_softmax`` compiles forward and backward kernels and returns a callable
+that embeds their object bytes in StableHLO custom calls. Each custom-call
 instance loads an ORCJIT module and retains it with its resolved TVM FFI
 function for the executable's lifetime.
 
@@ -49,73 +48,44 @@ def _compile_softmax_backward_object(
     return compile_to_object(SoftmaxBackward(dtype, N), example_dy, example_y, example_dx)
 
 
-_SERIALIZED_KERNELS: dict[tuple[str, int], Callable[[Array], Array]] = {}
-
-
-def register_softmax_ops(N: int, dtype: DType = jnp.bfloat16) -> None:
-    """Compile and serialize softmax kernels for one column count and dtype."""
-    cache_key = (jnp.dtype(dtype).name, N)
-    if cache_key in _SERIALIZED_KERNELS:
-        return
-
+def make_softmax(N: int, dtype: DType = jnp.bfloat16) -> Callable[[Array], Array]:
+    """Compile a softmax callable for two-dimensional arrays of shape ``(M, N)``."""
+    dtype = jnp.dtype(dtype)
     cutlass_dtype = _get_cutlass_dtype(dtype)
     forward = _compile_softmax_forward_object(cutlass_dtype, N)
     backward = _compile_softmax_backward_object(cutlass_dtype, N)
-    forward_calls: dict[tuple[tuple[int, ...], str], Callable[[Array], Array]] = {}
-    backward_calls: dict[tuple[tuple[int, ...], str], Callable[[Array, Array], Array]] = {}
-
-    def get_forward_call(x: Array) -> Callable[[Array], Array]:
-        key = (x.shape, jnp.dtype(x.dtype).name)
-        if key not in forward_calls:
-            forward_calls[key] = jax_tvm_ffi.ffi_call_from_serialized(
-                forward,
-                jax.ShapeDtypeStruct(x.shape, x.dtype),
-                platform="gpu",
-                arg_spec=("args", "rets"),
-                vmap_method="broadcast_all",
-            )
-        return forward_calls[key]
-
-    def get_backward_call(g: Array) -> Callable[[Array, Array], Array]:
-        key = (g.shape, jnp.dtype(g.dtype).name)
-        if key not in backward_calls:
-            backward_calls[key] = jax_tvm_ffi.ffi_call_from_serialized(
-                backward,
-                jax.ShapeDtypeStruct(g.shape, g.dtype),
-                platform="gpu",
-                arg_spec=("args", "rets"),
-                vmap_method="broadcast_all",
-            )
-        return backward_calls[key]
 
     @jax.custom_vjp
     def softmax_fn(x: Array) -> Array:
-        return get_forward_call(x)(x)
+        if x.ndim != 2 or x.shape[1] != N:
+            raise ValueError(f"Expected shape (M, {N}), got {x.shape}")
+        if x.dtype != dtype:
+            raise ValueError(f"Expected dtype {dtype}, got {x.dtype}")
+        call = jax_tvm_ffi.ffi_call_from_serialized(
+            forward,
+            jax.ShapeDtypeStruct(x.shape, x.dtype),
+            platform="gpu",
+            arg_spec=("args", "rets"),
+            vmap_method="broadcast_all",
+        )
+        return call(x)
 
     def softmax_fwd(x: Array) -> tuple[Array, Array]:
         y = softmax_fn(x)
         return y, y
 
     def softmax_bwd(y: Array, g: Array) -> tuple[Array]:
-        return (get_backward_call(g)(g, y),)
+        call = jax_tvm_ffi.ffi_call_from_serialized(
+            backward,
+            jax.ShapeDtypeStruct(g.shape, g.dtype),
+            platform="gpu",
+            arg_spec=("args", "rets"),
+            vmap_method="broadcast_all",
+        )
+        return (call(g, y),)
 
     softmax_fn.defvjp(softmax_fwd, softmax_bwd)
-    _SERIALIZED_KERNELS[cache_key] = softmax_fn
-
-
-def softmax(x: Array) -> Array:
-    """Compute softmax along the last axis using serialized CuTe DSL kernels."""
-    if x.ndim != 2:
-        raise ValueError(f"Expected 2D input, got shape {x.shape}")
-
-    key = (jnp.dtype(x.dtype).name, x.shape[-1])
-    softmax_fn = _SERIALIZED_KERNELS.get(key)
-    if softmax_fn is None:
-        raise RuntimeError(
-            f"Softmax not registered for dtype={x.dtype}, N={x.shape[-1]}. "
-            f"Call register_softmax_ops(N={x.shape[-1]}, dtype={x.dtype}) first."
-        )
-    return softmax_fn(x)
+    return softmax_fn
 
 
 def main() -> None:
@@ -129,7 +99,7 @@ def main() -> None:
     print(f"\nConfig: N={N}, dtype={dtype}")
 
     print("\n[1] Compiling and serializing CuTe DSL kernels...")
-    register_softmax_ops(N=N, dtype=dtype)
+    softmax = make_softmax(N=N, dtype=dtype)
     print("    Done!")
 
     print("\n[2] Testing JIT compilation...")

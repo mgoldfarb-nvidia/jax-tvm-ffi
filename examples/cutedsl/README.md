@@ -90,7 +90,7 @@ are the application's responsibility.
 The [consumer](run_exported_softmax.py) imports ORCJIT, loads the CuTe runtime,
 and registers the predefined payload target. Both producer and consumer register
 the target explicitly during setup. The consumer never imports `softmax.py` or
-the producer's kernel-registration code. ORCJIT restores the function from the
+the producer's kernel-construction code. ORCJIT restores the function from the
 embedded object, and the consumer checks its result against NumPy. Neither
 consumer path recompiles the CuTe kernel. The `jax.export` path still compiles
 the surrounding JAX computation with XLA before execution.
@@ -104,6 +104,26 @@ executable format, use matching JAX/jaxlib versions and a compatible device
 configuration in the producer and consumer.
 
 ## Usage
+
+### Serialized kernels
+
+`make_softmax(N, dtype)` compiles the forward and backward kernels and returns a
+differentiable callable that owns their serialized objects. Create it once and
+reuse it with `jax.jit`:
+
+```python
+import jax
+import jax.numpy as jnp
+import jax_tvm_ffi
+from examples.cutedsl.jax_softmax_serialized import make_softmax
+
+jax_tvm_ffi.register_builtin_targets(platform="gpu")
+softmax = make_softmax(N=1024, dtype=jnp.bfloat16)
+x = jax.random.normal(jax.random.key(0), (32, 1024), dtype=jnp.bfloat16)
+y = jax.jit(softmax)(x)
+```
+
+### Registered kernels
 
 ```python
 from examples.cutedsl.jax_softmax import softmax, register_softmax_ops
