@@ -7,7 +7,10 @@ import importlib
 import os
 import threading
 from collections.abc import Callable
+from importlib.metadata import version
 from typing import Any
+
+from packaging.version import Version
 
 from . import SerializedFunction
 
@@ -73,6 +76,12 @@ def compile_to_object(
         object's host-runtime symbols.
     """
     try:
+        cutedsl_version = version("nvidia-cutlass-dsl")
+        if Version(cutedsl_version) < Version("4.9.0.dev1"):
+            raise RuntimeError(
+                "compile_to_object requires CuTe DSL >=4.9.0.dev1 for TVM FFI object "
+                f"serialization; found {cutedsl_version}"
+            )
         cute = importlib.import_module("cutlass.cute")
         cutlass_dsl = importlib.import_module("cutlass.cutlass_dsl")
     except ImportError as error:
@@ -97,11 +106,6 @@ def compile_to_object(
             raise ValueError("compile_to_object requires a CUDA CuTe DSL function")
         function_name = compiled.function_name
         object_bytes = compiled.dump_to_object(function_name)
-        if b"__tvm_ffi_module_init" not in object_bytes:
-            raise RuntimeError(
-                "CuTe DSL emitted an object without __tvm_ffi_module_init; "
-                "install nvidia-cutlass-dsl==4.9.0.dev1 with TVM FFI object serialization support"
-            )
         return SerializedFunction(
             object_bytes=object_bytes,
             function_name=function_name,

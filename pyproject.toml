@@ -15,7 +15,7 @@ classifiers = [
 keywords = ["machine learning", "inference"]
 requires-python = ">=3.11"
 
-dependencies = ["jax>=0.8.1", "apache-tvm-ffi>=0.1.8.post2"]
+dependencies = ["jax>=0.8.1", "apache-tvm-ffi>=0.1.8.post2", "packaging"]
 
 [project.optional-dependencies]
 cutedsl = ["nvidia-cutlass-dsl==4.9.0.dev1"]

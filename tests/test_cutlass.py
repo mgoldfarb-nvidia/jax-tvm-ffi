@@ -11,10 +11,11 @@ from jax_tvm_ffi import cutlass
 @pytest.fixture
 def fake_cutlass(monkeypatch):
     state = types.SimpleNamespace(
+        version="4.9.0.dev1",
         calls=[],
         dump_error=None,
         has_gpu_module=True,
-        object_bytes=b"object\0__tvm_ffi_softmax\0__tvm_ffi_module_init\0",
+        object_bytes=b"object",
     )
 
     class CompiledFunction:
@@ -62,6 +63,7 @@ def fake_cutlass(monkeypatch):
     monkeypatch.setitem(sys.modules, "cutlass.cute", cute_module)
     monkeypatch.setitem(sys.modules, "cutlass.cutlass_dsl", cutlass_dsl_module)
     monkeypatch.setitem(sys.modules, "cutlass.runtime", runtime_module)
+    monkeypatch.setattr(cutlass, "version", lambda _: state.version)
     monkeypatch.setattr(cutlass, "_RUNTIME_LIBRARY_HANDLES", {})
     monkeypatch.setattr(
         cutlass.ctypes,
@@ -72,7 +74,9 @@ def fake_cutlass(monkeypatch):
     return state
 
 
-def test_compile_to_object_dumps_tvm_ffi_compiled_handle(fake_cutlass):
+@pytest.mark.parametrize("cutedsl_version", ["4.9.0.dev1", "4.9.0", "4.10.0.dev0"])
+def test_compile_to_object_dumps_tvm_ffi_compiled_handle(fake_cutlass, cutedsl_version):
+    fake_cutlass.version = cutedsl_version
     function = lambda: None
 
     result = cutlass.compile_to_object(
@@ -144,11 +148,14 @@ def test_compile_to_object_propagates_dump_failure(fake_cutlass):
         cutlass.compile_to_object(lambda: None)
 
 
-def test_compile_to_object_rejects_generic_object_dump(fake_cutlass):
-    fake_cutlass.object_bytes = b"object\0generic___tvm_ffi_softmax\0"
+@pytest.mark.parametrize("cutedsl_version", ["4.8.0", "4.9.0.dev0"])
+def test_compile_to_object_rejects_unsupported_version(fake_cutlass, cutedsl_version):
+    fake_cutlass.version = cutedsl_version
 
-    with pytest.raises(RuntimeError, match="__tvm_ffi_module_init"):
+    with pytest.raises(RuntimeError, match=r"requires CuTe DSL >=4\.9\.0\.dev1"):
         cutlass.compile_to_object(lambda: None)
+
+    assert not fake_cutlass.calls
 
 
 def test_compile_to_object_rejects_cpu_only_handle(fake_cutlass):
