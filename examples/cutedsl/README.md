@@ -57,8 +57,8 @@ ORCJIT.
 
 Call `jax_tvm_ffi.register_builtin_targets(platform="gpu")` during application
 setup before compiling or loading payload-backed computations. The call
-factories do not register the target. Registration initializes the JAX backend,
-so complete distributed initialization and backend configuration first.
+factories do not register the target. Registration does not initialize a JAX
+backend and can run before distributed initialization or backend configuration.
 
 ## Export and AOT deployment
 

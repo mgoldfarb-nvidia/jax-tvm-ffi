@@ -1228,13 +1228,36 @@ xla::ffi::ErrorOr<std::unique_ptr<PayloadCallState<DeviceType>>> InstantiatePayl
   }
 }
 
-using CpuPayloadCallState = PayloadCallState<kDLCPU>;
-using GpuPayloadCallState = PayloadCallState<kDLCUDA>;
+template <int DeviceType>
+XLA_FFI_Error* RunPayloadInstantiateHandler(XLA_FFI_CallFrame* call_frame) {
+  // JAX can replay queued targets before types. Register the state type here
+  // before the typed handler reports its metadata, without creating a backend.
+  static std::mutex registration_mutex;
+  {
+    std::lock_guard<std::mutex> lock(registration_mutex);
+    if (PayloadCallState<DeviceType>::id == XLA_FFI_UNKNOWN_TYPE_ID) {
+      constexpr std::string_view type_name = DeviceType == kDLCPU
+                                                 ? "jax_tvm_ffi.payload_call_state.cpu"
+                                                 : "jax_tvm_ffi.payload_call_state.gpu";
+      if (XLA_FFI_Error* error = xla::ffi::Ffi::RegisterTypeId(
+              call_frame->api, type_name, &PayloadCallState<DeviceType>::id,
+              xla::ffi::MakeTypeInfo<PayloadCallState<DeviceType>>())) {
+        return error;
+      }
+    }
+  }
+  XLA_FFI_DEFINE_HANDLER(handler, InstantiatePayloadCall<DeviceType>,
+                         xla::ffi::Ffi::BindInstantiate().Attrs());
+  return handler(call_frame);
+}
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(JAXTVMFFICpuPayloadCallInstantiate, InstantiatePayloadCall<kDLCPU>,
-                              xla::ffi::Ffi::BindInstantiate().Attrs());
-XLA_FFI_DEFINE_HANDLER_SYMBOL(JAXTVMFFIGpuPayloadCallInstantiate, InstantiatePayloadCall<kDLCUDA>,
-                              xla::ffi::Ffi::BindInstantiate().Attrs());
+extern "C" XLA_FFI_Error* JAXTVMFFICpuPayloadCallInstantiate(XLA_FFI_CallFrame* call_frame) {
+  return RunPayloadInstantiateHandler<kDLCPU>(call_frame);
+}
+
+extern "C" XLA_FFI_Error* JAXTVMFFIGpuPayloadCallInstantiate(XLA_FFI_CallFrame* call_frame) {
+  return RunPayloadInstantiateHandler<kDLCUDA>(call_frame);
+}
 
 template <int DeviceType>
 class PayloadExecuteHandler : public xla::ffi::Ffi {
@@ -1312,12 +1335,6 @@ extern "C" XLA_FFI_Error* JAXTVMFFIGpuPayloadCallExecute(XLA_FFI_CallFrame* call
   return RunPayloadExecuteHandler<kDLCUDA>(call_frame);
 }
 
-template <int DeviceType>
-xla::ffi::TypeInfo* GetPayloadCallStateTypeInfo() {
-  static auto type_info = xla::ffi::MakeTypeInfo<PayloadCallState<DeviceType>>();
-  return &type_info;
-}
-
 void* PayloadCallInstantiateHandler(int64_t device_type) {
   if (device_type == kDLCPU) {
     return reinterpret_cast<void*>(&JAXTVMFFICpuPayloadCallInstantiate);
@@ -1334,26 +1351,6 @@ void* PayloadCallExecuteHandler(int64_t device_type) {
   }
   if (device_type == kDLCUDA) {
     return reinterpret_cast<void*>(&JAXTVMFFIGpuPayloadCallExecute);
-  }
-  TVM_FFI_THROW(ValueError) << "Unsupported payload device type: " << device_type;
-}
-
-void* PayloadCallStateTypeId(int64_t device_type) {
-  if (device_type == kDLCPU) {
-    return &CpuPayloadCallState::id;
-  }
-  if (device_type == kDLCUDA) {
-    return &GpuPayloadCallState::id;
-  }
-  TVM_FFI_THROW(ValueError) << "Unsupported payload device type: " << device_type;
-}
-
-void* PayloadCallStateTypeInfo(int64_t device_type) {
-  if (device_type == kDLCPU) {
-    return GetPayloadCallStateTypeInfo<kDLCPU>();
-  }
-  if (device_type == kDLCUDA) {
-    return GetPayloadCallStateTypeInfo<kDLCUDA>();
   }
   TVM_FFI_THROW(ValueError) << "Unsupported payload device type: " << device_type;
 }
@@ -1438,7 +1435,5 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(get_last_workspace_peak, GetLastWorkspacePeak);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(load_orcjit_object_module, LoadOrcjitObjectModule);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_instantiate_handler, PayloadCallInstantiateHandler);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_execute_handler, PayloadCallExecuteHandler);
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_state_type_id, PayloadCallStateTypeId);
-TVM_FFI_DLL_EXPORT_TYPED_FUNC(payload_call_state_type_info, PayloadCallStateTypeInfo);
 
 }  // namespace jax_tvm_ffi

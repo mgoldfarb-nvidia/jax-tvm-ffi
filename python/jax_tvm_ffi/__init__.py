@@ -113,8 +113,8 @@ def register_builtin_targets(platform: str = "gpu") -> str:
     custom payload format, register its TVM global loader instead. Load any
     libraries required by the objects, such as the CuTe DSL runtime, as well.
 
-    This initializes the selected JAX backend. Complete distributed
-    initialization and backend configuration before calling this function.
+    This does not initialize a JAX backend and can be called before distributed
+    initialization or backend configuration.
     """
     device_type = int(_get_dl_device_type(platform))
     target = _PAYLOAD_TARGET
@@ -122,23 +122,6 @@ def register_builtin_targets(platform: str = "gpu") -> str:
         if platform in _registered_payload_targets:
             return target
 
-    # JAX replays queued FFI targets before queued FFI types when a backend is
-    # first created. Initialize it before registering this stateful target so
-    # the type is visible when the handler registration is applied.
-    jax.devices(platform)
-
-    with _payload_registration_lock:
-        if platform in _registered_payload_targets:
-            return target
-
-        jax.ffi.register_ffi_type(
-            f"jax_tvm_ffi.payload_call_state.{platform}",
-            {
-                "type_id": jax.ffi.pycapsule(_LIB.payload_call_state_type_id(device_type)),
-                "type_info": jax.ffi.pycapsule(_LIB.payload_call_state_type_info(device_type)),
-            },
-            platform=platform,
-        )
         jax.ffi.register_ffi_target(
             target,
             {

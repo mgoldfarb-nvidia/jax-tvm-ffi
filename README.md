@@ -130,9 +130,9 @@ For standalone C++ objects on Linux AArch64, compile with
 
 Call `jax_tvm_ffi.register_builtin_targets(platform=...)` once per platform in
 each process before compiling or loading a payload-backed computation.
-Registration initializes the selected JAX backend, so complete
-`jax.distributed.initialize()` and other backend configuration first. The call
-factories only construct calls and can be used before registration.
+Registration does not initialize a JAX backend and can run before
+`jax.distributed.initialize()` or backend configuration. The call factories
+only construct calls and can be used before registration.
 
 CUTLASS DSL users can obtain CUDA object bytes and an exported name with
 `jax_tvm_ffi.cutlass.compile_to_object`. The helper uses
@@ -205,9 +205,8 @@ bytes and function name, so the consumer does not need the original compiler,
 Python kernel, or per-function target registration. The consuming environment
 must support the object's native architecture and runtime dependencies.
 
-`register_builtin_targets` is idempotent and initializes the chosen backend;
-call it after distributed initialization and backend configuration. For custom
-payload formats, register their TVM global loader in place of importing
+`register_builtin_targets` is idempotent and does not initialize a backend.
+For custom payload formats, register their TVM global loader in place of importing
 `tvm_ffi_orcjit`. For `jax.export`, pass
 `jax.export.DisabledSafetyCheck.custom_call("jax_tvm_ffi.payload_call")` through
 `export`'s `disabled_checks` argument and initialize the consumer the same way.

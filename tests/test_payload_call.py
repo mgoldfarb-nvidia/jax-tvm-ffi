@@ -45,14 +45,20 @@ _PAYLOAD_CPP_SOURCE = r"""
 _PAYLOAD_FUNCTIONS = ("add", "subtract")
 
 
-def test_payload_call_construction_defers_backend_initialization_until_registration():
+@pytest.mark.parametrize("backend_initialized", [False, True])
+def test_payload_registration_preserves_backend_initialization(backend_initialized):
     script = """
+import sys
+
 import jax
 import jax.numpy as jnp
 import jax_tvm_ffi
 from jax._src import xla_bridge
 
 assert not xla_bridge.backends_are_initialized()
+backend_initialized = sys.argv[1] == "True"
+if backend_initialized:
+    jax.devices("cpu")
 call = jax_tvm_ffi.ffi_call_from_payload(
     b"payload",
     "missing.Loader",
@@ -60,8 +66,10 @@ call = jax_tvm_ffi.ffi_call_from_payload(
     jax.ShapeDtypeStruct((1,), jnp.float32),
     platform="cpu",
 )
-assert not xla_bridge.backends_are_initialized()
+assert xla_bridge.backends_are_initialized() == backend_initialized
 jax_tvm_ffi.register_builtin_targets(platform="cpu")
+jax_tvm_ffi.register_builtin_targets(platform="cpu")
+assert xla_bridge.backends_are_initialized() == backend_initialized
 try:
     jax.jit(call)(jnp.zeros((1,), jnp.float32))
 except Exception as error:
@@ -72,7 +80,9 @@ else:
 """
     environment = os.environ.copy()
     environment["JAX_PLATFORMS"] = "cpu"
-    subprocess.run([sys.executable, "-c", script], check=True, env=environment)
+    subprocess.run(
+        [sys.executable, "-c", script, str(backend_initialized)], check=True, env=environment
+    )
 
 
 @pytest.fixture(scope="module")
