@@ -62,6 +62,8 @@ backend and can run before distributed initialization or backend configuration.
 
 ## Export and AOT deployment
 
+The built-in payload APIs support **CUDA GPUs only** (`platform="gpu"`).
+
 The producer compiles a `(32, 1024)` float32 softmax and writes two artifacts.
 Both contain the compiled TVM-FFI object bytes and exported function name:
 

@@ -100,14 +100,15 @@ def _get_dl_device_type(platform: str) -> int:
 
 
 def register_builtin_targets(platform: str = "gpu") -> str:
-    """Register the built-in GPU FFI targets and their state types.
+    """Register the built-in CUDA GPU FFI targets and their state types.
 
     Call this during process setup before compiling payload-backed calls,
     deserializing a compiled executable, or calling a deserialized JAX export.
     It registers the bridge and its state type without requiring the original
     object bytes or Python callable.
-    Only ``platform="gpu"`` is supported. Repeated registration is safe. Returns the target
-    name, which can also be used with ``jax.export.DisabledSafetyCheck.custom_call``.
+    Only CUDA GPUs (``platform="gpu"``) are supported. Repeated registration is safe.
+    Returns the target name, which can also be used with
+    ``jax.export.DisabledSafetyCheck.custom_call``.
 
     Import ``tvm_ffi_orcjit`` before loading object-backed executables. For a
     custom payload format, register its TVM global loader instead. Load any
@@ -179,7 +180,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
     output_layouts: Sequence[Any] | None = None,
     input_output_aliases: dict[int, int] | None = None,
 ) -> Callable[..., Any]:
-    """Build a GPU JAX FFI call whose executable owns its compiled payload.
+    """Build a CUDA GPU JAX FFI call whose executable owns its compiled payload.
 
     ``payload_loader`` names a registered TVM global function with signature
     ``(Bytes) -> Module``. Each custom-call instantiation loads a module and
@@ -195,9 +196,10 @@ def ffi_call_from_payload(  # noqa: PLR0913
     returned JAX value, and passed to the loaded function as opaque pointers
     after its ordinary tensor arguments and results.
 
-    Only ``platform="gpu"`` is supported. Call :func:`register_builtin_targets` during process
-    setup before compiling or executing the call. Constructing the call does not
-    register the target or initialize a JAX backend.
+    Only CUDA GPUs (``platform="gpu"``) are supported. Call
+    :func:`register_builtin_targets` during process setup before compiling or
+    executing the call. Constructing the call does not register the target or
+    initialize a JAX backend.
     """
     if platform != "gpu":
         raise ValueError("Payload-backed calls only support platform='gpu'")
@@ -293,8 +295,9 @@ def ffi_call_from_object(
     bridge resolves ``function_name``. The call state retains the module and
     function for the executable's lifetime.
 
-    Call :func:`register_builtin_targets` during process setup before compiling
-    or executing the call.
+    Only CUDA GPUs (``platform="gpu"``) are supported. Call
+    :func:`register_builtin_targets` during process setup before compiling or
+    executing the call.
     """
     if platform != "gpu":
         raise ValueError("Payload-backed calls only support platform='gpu'")
@@ -334,8 +337,9 @@ def ffi_call_from_serialized(
     results. It passes the object's bytes and exported function name to
     :func:`ffi_call_from_object`.
 
-    Call :func:`register_builtin_targets` during process setup before compiling
-    or executing the call.
+    Only CUDA GPUs (``platform="gpu"``) are supported. Call
+    :func:`register_builtin_targets` during process setup before compiling or
+    executing the call.
     """
     if not isinstance(serialized_function, SerializedFunction):
         raise TypeError("serialized_function must be a SerializedFunction")

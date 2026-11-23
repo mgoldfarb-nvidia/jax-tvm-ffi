@@ -93,10 +93,13 @@ result = jax.ffi.ffi_call("my.function", output_shape)(x, y, eps=1e-5)
 
 ### Object-backed calls
 
+`register_builtin_targets`, `ffi_call_from_payload`, `ffi_call_from_object`,
+and `ffi_call_from_serialized` support **CUDA GPUs only**, using `platform="gpu"`.
+
 Export and ahead-of-time deployment are the main use case: compile the TVM-FFI
 kernel in a producer process, embed its object bytes in the JAX artifact, and
 load it in a consumer without the original kernel source or per-function
-registration. Built-in payload-backed calls support CUDA GPUs.
+registration.
 The [CuTe export/AOT example](examples/cutedsl/README.md#export-and-aot-deployment)
 provides separate producer and consumer scripts for both artifact formats:
 
@@ -182,7 +185,7 @@ arena and does not pass the arena itself to the function.
 #### Loading in a fresh process
 
 Before deserializing a compiled executable, initialize the loader and register
-the predefined target on the consuming platform:
+the predefined GPU target in the consuming process:
 
 ```python
 import jax_tvm_ffi
