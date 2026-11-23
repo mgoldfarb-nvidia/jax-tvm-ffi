@@ -975,8 +975,18 @@ class JAXTVMFFIHandler : public xla::ffi::Ffi {
       return InvalidArgument(call_frame->api, msg.str());
     }
     const XLA_FFI_ByteSpan* attr_name = call_frame->attrs.names[attr_index];
-    if (XLA_FFI_PREDICT_FALSE(std::string_view(attr_name->ptr, attr_name->len) !=
-                              expected_attr_name)) {
+    auto str_eq = [](const XLA_FFI_ByteSpan* a, const std::string& b) {
+      if (XLA_FFI_PREDICT_FALSE(a->len != b.size())) {
+        return false;
+      }
+      for (size_t i = 0; i < a->len; ++i) {
+        if (XLA_FFI_PREDICT_FALSE(a->ptr[i] != b[i])) {
+          return false;
+        }
+      }
+      return true;
+    };
+    if (XLA_FFI_PREDICT_FALSE(!str_eq(attr_name, expected_attr_name))) {
       std::ostringstream msg;
       msg << "Expected attribute `" << expected_attr_name << "` at index " << attr_index
           << ", got `" << std::string_view(attr_name->ptr, attr_name->len) << "`";
