@@ -17,7 +17,6 @@ pytestmark = requires_gpu
 def cutlass_dependencies():
     pytest.importorskip("cutlass")
     pytest.importorskip("tvm_ffi_orcjit")
-    pytest.importorskip("flatbuffers")
 
 
 def _run_example(module, *args):
@@ -40,21 +39,17 @@ def test_cutlass_compile_and_run():
     _run_example("jax_softmax_serialized")
 
 
-@pytest.fixture(scope="module")
-def exported_softmax(tmp_path_factory):
-    artifact_directory = tmp_path_factory.mktemp("cutlass_export")
-    _run_example("export_softmax", artifact_directory)
-    return artifact_directory
-
-
 @pytest.mark.parametrize(
     ("artifact_format", "artifact_name"),
     [("export", "softmax.jax"), ("executable", "softmax.pkl")],
 )
-def test_cutlass_export_round_trip(exported_softmax, artifact_format, artifact_name):
+def test_cutlass_export_round_trip(tmp_path, artifact_format, artifact_name):
+    if artifact_format == "export":
+        pytest.importorskip("flatbuffers")
+    _run_example("export_softmax", tmp_path, "--format", artifact_format)
     _run_example(
         "run_exported_softmax",
-        exported_softmax / artifact_name,
+        tmp_path / artifact_name,
         "--format",
         artifact_format,
     )

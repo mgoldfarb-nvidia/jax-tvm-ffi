@@ -70,6 +70,14 @@ pip install -e ".[cutedsl,orcjit]" flatbuffers
 python -m examples.cutedsl.export_softmax /tmp/softmax-artifacts
 ```
 
+Only the JAX export format requires `flatbuffers`. To create just the serialized
+executable without that dependency, select `--format executable`:
+
+```bash
+pip install -e ".[cutedsl,orcjit]"
+python -m examples.cutedsl.export_softmax /tmp/softmax-artifacts --format executable
+```
+
 Run each consumer command in a new process:
 
 ```bash
@@ -164,13 +172,14 @@ if len(devices) >= 2:
 With CUDA-enabled JAX installed, run from the repository root:
 
 ```bash
-pip install -e ".[cutedsl,orcjit]" pytest flatbuffers
+pip install -e ".[cutedsl,orcjit]" pytest
 JAX_PLATFORMS=cuda,cpu python -m pytest -q tests/test_cutlass.py
 ```
 
 These tests compile and execute real CuTe kernels and exercise JAX export and
 AOT executable round trips. They skip when a GPU or required optional
-dependencies are unavailable.
+dependencies are unavailable. Install `flatbuffers` to include the JAX export
+test; compile-and-run and serialized-executable tests do not require it.
 
 ## Files
 
