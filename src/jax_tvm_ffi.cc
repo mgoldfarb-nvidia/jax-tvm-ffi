@@ -1152,10 +1152,10 @@ xla::ffi::ErrorOr<std::unique_ptr<PayloadCallState>> InstantiatePayloadCall(
     }
     DecodeSpec decode_spec = ParseArgSpec(DecodeArgSpec(decoded->arg_spec));
     PrecomputePayloadAttributeIndices(&decode_spec, attrs);
-    auto handler = std::make_unique<JAXTVMFFIHandler>(
-        std::move(*function), std::move(decode_spec), kDLCUDA,
-        /*traits=*/0, /*pass_owned_tensor=*/false,
-        /*use_last_output_for_alloc_workspace=*/false);
+    auto handler =
+        std::make_unique<JAXTVMFFIHandler>(std::move(*function), std::move(decode_spec), kDLCUDA,
+                                           /*traits=*/0, /*pass_owned_tensor=*/false,
+                                           /*use_last_output_for_alloc_workspace=*/false);
     return std::make_unique<PayloadCallState>(std::move(module), std::move(handler));
   } catch (const std::invalid_argument& error) {
     return xla::ffi::Unexpected(xla::ffi::Error::InvalidArgument(
