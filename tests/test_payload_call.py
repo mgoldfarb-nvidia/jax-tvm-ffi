@@ -61,7 +61,7 @@ call = jax_tvm_ffi.ffi_call_from_payload(
     platform="cpu",
 )
 assert not xla_bridge.backends_are_initialized()
-jax_tvm_ffi.register_payload_target(platform="cpu")
+jax_tvm_ffi.register_builtin_targets(platform="cpu")
 try:
     jax.jit(call)(jnp.zeros((1,), jnp.float32))
 except Exception as error:
@@ -77,7 +77,7 @@ else:
 
 @pytest.fixture(scope="module")
 def payload_target():
-    return jax_tvm_ffi.register_payload_target(platform="cpu")
+    return jax_tvm_ffi.register_builtin_targets(platform="cpu")
 
 
 @pytest.mark.parametrize("object_bytes", [b"", bytearray(b"object"), "object", None])
@@ -248,8 +248,8 @@ import tvm_ffi_orcjit
 from jax import export
 from jax.experimental import serialize_executable
 
-jax_tvm_ffi.register_payload_target(platform="cpu")
-jax_tvm_ffi.register_payload_target(platform="cpu")
+jax_tvm_ffi.register_builtin_targets(platform="cpu")
+jax_tvm_ffi.register_builtin_targets(platform="cpu")
 artifact = Path(sys.argv[1]).read_bytes()
 if sys.argv[2] == "export":
     exported = export.deserialize(bytearray(artifact))

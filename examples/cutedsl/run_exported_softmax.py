@@ -22,7 +22,7 @@ def main() -> None:
     args = parser.parse_args()
 
     load_runtime()
-    jax_tvm_ffi.register_payload_target(platform="gpu")
+    jax_tvm_ffi.register_builtin_targets(platform="gpu")
     gpu = jax.devices("gpu")[0]
     with jax.default_device(gpu):
         if args.format == "export":

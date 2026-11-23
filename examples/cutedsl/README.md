@@ -56,7 +56,7 @@ call
 `jax_tvm_ffi.cutlass.load_runtime()` when loading a previously serialized JAX
 executable in a fresh process without recompiling the kernel first.
 
-Call `jax_tvm_ffi.register_payload_target(platform="gpu")` during application
+Call `jax_tvm_ffi.register_builtin_targets(platform="gpu")` during application
 setup before compiling or loading payload-backed computations. The call
 factories do not register the target. Registration initializes the JAX backend,
 so complete distributed initialization and backend configuration first.

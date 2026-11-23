@@ -128,7 +128,7 @@ the Python wrapper's compiler-specific runtime discovery.
 For standalone C++ objects on Linux AArch64, compile with
 `-mno-outline-atomics` to avoid dependencies on libgcc's non-exported atomic helpers.
 
-Call `jax_tvm_ffi.register_payload_target(platform=...)` once per platform in
+Call `jax_tvm_ffi.register_builtin_targets(platform=...)` once per platform in
 each process before compiling or loading a payload-backed computation.
 Registration initializes the selected JAX backend, so complete
 `jax.distributed.initialize()` and other backend configuration first. The call
@@ -147,7 +147,7 @@ already-serialized executable without recompiling must call
 ```python
 from jax_tvm_ffi.cutlass import compile_to_object
 
-jax_tvm_ffi.register_payload_target(platform="gpu")
+jax_tvm_ffi.register_builtin_targets(platform="gpu")
 serialized_function = compile_to_object(
     kernel,
     *compile_args,
@@ -187,7 +187,7 @@ import jax_tvm_ffi
 import tvm_ffi_orcjit
 from jax.experimental import serialize_executable
 
-jax_tvm_ffi.register_payload_target(platform="gpu")
+jax_tvm_ffi.register_builtin_targets(platform="gpu")
 # For objects compiled by CuTe DSL, also load its runtime libraries:
 from jax_tvm_ffi.cutlass import load_runtime
 load_runtime()
@@ -204,7 +204,7 @@ bytes and function name, so the consumer does not need the original compiler,
 Python kernel, or per-function target registration. The consuming environment
 must support the object's native architecture and runtime dependencies.
 
-`register_payload_target` is idempotent and initializes the chosen backend;
+`register_builtin_targets` is idempotent and initializes the chosen backend;
 call it after distributed initialization and backend configuration. For custom
 payload formats, register their TVM global loader in place of importing
 `tvm_ffi_orcjit`. For `jax.export`, pass

@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument("output_directory", type=Path)
     args = parser.parse_args()
 
-    target = jax_tvm_ffi.register_payload_target(platform="gpu")
+    target = jax_tvm_ffi.register_builtin_targets(platform="gpu")
     gpu = jax.devices("gpu")[0]
     with jax.default_device(gpu):
         register_softmax_ops(N=1024, dtype=jnp.float32)

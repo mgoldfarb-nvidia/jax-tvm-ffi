@@ -99,8 +99,8 @@ def _get_dl_device_type(platform: str) -> int:
         raise ValueError(f"Unsupported platform: {platform}")
 
 
-def register_payload_target(platform: str = "gpu") -> str:
-    """Register the predefined target for loading payload-backed executables.
+def register_builtin_targets(platform: str = "gpu") -> str:
+    """Register the built-in FFI targets for the selected platform.
 
     Call this during process setup before compiling payload-backed calls,
     deserializing a compiled executable, or calling a deserialized JAX export.
@@ -205,7 +205,7 @@ def ffi_call_from_payload(  # noqa: PLR0913
     returned JAX value, and passed to the loaded function as opaque pointers
     after its ordinary tensor arguments and results.
 
-    Call :func:`register_payload_target` for the selected platform during process
+    Call :func:`register_builtin_targets` for the selected platform during process
     setup before compiling or executing the call. Constructing the call does not
     register the target or initialize a JAX backend.
     """
@@ -301,7 +301,7 @@ def ffi_call_from_object(
     bridge resolves ``function_name``. The call state retains the module and
     function for the executable's lifetime.
 
-    Call :func:`register_payload_target` during process setup before compiling
+    Call :func:`register_builtin_targets` during process setup before compiling
     or executing the call.
     """
     _require_orcjit()
@@ -340,7 +340,7 @@ def ffi_call_from_serialized(
     results. It passes the object's bytes and exported function name to
     :func:`ffi_call_from_object`.
 
-    Call :func:`register_payload_target` during process setup before compiling
+    Call :func:`register_builtin_targets` during process setup before compiling
     or executing the call.
     """
     if not isinstance(serialized_function, SerializedFunction):
