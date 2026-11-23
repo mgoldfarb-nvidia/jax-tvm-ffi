@@ -74,7 +74,7 @@ def fake_cutlass(monkeypatch):
     return state
 
 
-@pytest.mark.parametrize("cutedsl_version", ["4.9.0.dev1", "4.9.0", "4.10.0.dev0"])
+@pytest.mark.parametrize("cutedsl_version", ["4.9.0.dev0", "4.9.0.dev1", "4.9.0", "4.10.0.dev0"])
 def test_compile_to_object_dumps_tvm_ffi_compiled_handle(fake_cutlass, cutedsl_version):
     fake_cutlass.version = cutedsl_version
     function = lambda: None
@@ -148,11 +148,11 @@ def test_compile_to_object_propagates_dump_failure(fake_cutlass):
         cutlass.compile_to_object(lambda: None)
 
 
-@pytest.mark.parametrize("cutedsl_version", ["4.8.0", "4.9.0.dev0"])
+@pytest.mark.parametrize("cutedsl_version", ["4.8.9", "4.8.9.dev99"])
 def test_compile_to_object_rejects_unsupported_version(fake_cutlass, cutedsl_version):
     fake_cutlass.version = cutedsl_version
 
-    with pytest.raises(RuntimeError, match=r"requires CuTe DSL >=4\.9\.0\.dev1"):
+    with pytest.raises(RuntimeError, match=r"requires CuTe DSL 4\.9\.0 or newer"):
         cutlass.compile_to_object(lambda: None)
 
     assert not fake_cutlass.calls

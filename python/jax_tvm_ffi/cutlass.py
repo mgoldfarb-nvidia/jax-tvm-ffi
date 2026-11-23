@@ -77,10 +77,10 @@ def compile_to_object(
     """
     try:
         cutedsl_version = version("nvidia-cutlass-dsl")
-        if Version(cutedsl_version) < Version("4.9.0.dev1"):
+        if Version(cutedsl_version) < Version("4.9.0.dev0"):
             raise RuntimeError(
-                "compile_to_object requires CuTe DSL >=4.9.0.dev1 for TVM FFI object "
-                f"serialization; found {cutedsl_version}"
+                "compile_to_object requires CuTe DSL 4.9.0 or newer, including development "
+                f"builds, for TVM FFI object serialization; found {cutedsl_version}"
             )
         cute = importlib.import_module("cutlass.cute")
         cutlass_dsl = importlib.import_module("cutlass.cutlass_dsl")
