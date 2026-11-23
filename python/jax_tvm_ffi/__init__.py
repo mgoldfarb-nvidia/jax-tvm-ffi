@@ -12,7 +12,6 @@ from typing import Any, Callable, Optional
 
 import jax
 import jax.ffi
-import jax.numpy as jnp
 import tvm_ffi
 
 
@@ -50,7 +49,6 @@ _PAYLOAD_INTERNAL_ATTRS = frozenset(
         "arg_spec",
         "device_type",
         "function_name",
-        "num_workspace_outputs",
         "payload",
         "payload_loader",
     }
@@ -63,17 +61,6 @@ tvm_ffi.register_global_func(
     _LIB.load_orcjit_object_module,
     override=True,
 )
-
-
-@dataclass(frozen=True)
-class Workspace:
-    """A hidden device buffer passed to a payload function as an opaque pointer."""
-
-    size_in_bytes: int
-
-    def __post_init__(self) -> None:
-        if self.size_in_bytes <= 0:
-            raise ValueError("Workspace size_in_bytes must be positive")
 
 
 @dataclass(frozen=True)
@@ -183,7 +170,6 @@ def ffi_call_from_payload(  # noqa: PLR0913
     platform: str = "gpu",
     allow_cuda_graph: bool = False,
     arg_spec: Sequence[str] | None = None,
-    workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
     input_layouts: Sequence[Any] | None = None,
     output_layouts: Sequence[Any] | None = None,
@@ -201,9 +187,9 @@ def ffi_call_from_payload(  # noqa: PLR0913
     ``ctx.stream`` entries as :func:`register_ffi_target`. Keyword arguments to
     the returned callable must exactly match its ``attrs.<key>`` entries.
 
-    Workspace buffers are appended to the custom call outputs, hidden from the
-    returned JAX value, and passed to the loaded function as opaque pointers
-    after its ordinary tensor arguments and results.
+    Scratch buffers can be declared as ordinary tensor outputs. To reuse an
+    input buffer for writable scratch, alias it to an output with
+    ``input_output_aliases``.
 
     ``allow_cuda_graph=True`` selects the CUDA graph-compatible target. The
     function must safely capture and replay its device operations on the supplied
@@ -223,28 +209,16 @@ def ffi_call_from_payload(  # noqa: PLR0913
         raise ValueError("payload_loader must be nonempty")
     if not function_name:
         raise ValueError("function_name must be nonempty")
-    if output_layouts is not None and len(output_layouts) != len(
-        jax.tree.leaves(result_shape_dtypes)
-    ):
-        raise ValueError("output_layouts must describe only the visible results")
     encoded_arg_spec, expected_attr_names = _encode_arg_spec(arg_spec)
 
     device_type = int(_get_dl_device_type(platform))
     result_leaves, result_tree = jax.tree.flatten(result_shape_dtypes)
-    workspace_results = tuple(
-        jax.ShapeDtypeStruct((workspace.size_in_bytes,), jnp.uint8) for workspace in workspaces
-    )
-    all_results = (*result_leaves, *workspace_results)
-    all_output_layouts = None
-    if output_layouts is not None:
-        all_output_layouts = (*output_layouts, *((0,) for _ in workspaces))
-
     call = jax.ffi.ffi_call(
         _PAYLOAD_CUDA_GRAPH_TARGET if allow_cuda_graph else _PAYLOAD_TARGET,
-        all_results,
+        result_leaves,
         vmap_method=vmap_method,
         input_layouts=input_layouts,
-        output_layouts=all_output_layouts,
+        output_layouts=output_layouts,
         input_output_aliases=input_output_aliases,
     )
 
@@ -263,10 +237,8 @@ def ffi_call_from_payload(  # noqa: PLR0913
             payload_loader=payload_loader,
             function_name=function_name,
             device_type=device_type,
-            num_workspace_outputs=len(workspaces),
         )
-        visible_results = tuple(results[: len(result_leaves)])
-        return jax.tree.unflatten(result_tree, visible_results)
+        return jax.tree.unflatten(result_tree, results)
 
     return wrapped
 
@@ -289,7 +261,7 @@ def _require_orcjit() -> None:
         )
 
 
-def ffi_call_from_object(  # noqa: PLR0913
+def ffi_call_from_object(
     object_bytes: bytes,
     function_name: str,
     result_shape_dtypes: Any,
@@ -297,7 +269,6 @@ def ffi_call_from_object(  # noqa: PLR0913
     platform: str = "gpu",
     allow_cuda_graph: bool = False,
     arg_spec: Sequence[str] | None = None,
-    workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
     input_layouts: Sequence[Any] | None = None,
     output_layouts: Sequence[Any] | None = None,
@@ -330,7 +301,6 @@ def ffi_call_from_object(  # noqa: PLR0913
         platform=platform,
         allow_cuda_graph=allow_cuda_graph,
         arg_spec=arg_spec,
-        workspaces=workspaces,
         vmap_method=vmap_method,
         input_layouts=input_layouts,
         output_layouts=output_layouts,
@@ -345,7 +315,6 @@ def ffi_call_from_serialized(
     platform: str = "gpu",
     allow_cuda_graph: bool = False,
     arg_spec: Sequence[str] | None = None,
-    workspaces: Sequence[Workspace] = (),
     vmap_method: str | None = None,
     input_layouts: Sequence[Any] | None = None,
     output_layouts: Sequence[Any] | None = None,
@@ -373,7 +342,6 @@ def ffi_call_from_serialized(
         platform=platform,
         allow_cuda_graph=allow_cuda_graph,
         arg_spec=arg_spec,
-        workspaces=workspaces,
         vmap_method=vmap_method,
         input_layouts=input_layouts,
         output_layouts=output_layouts,

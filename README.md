@@ -181,7 +181,6 @@ call = jax_tvm_ffi.ffi_call_from_serialized(
     jax.ShapeDtypeStruct(output_shape, jnp.float32),
     platform="gpu",
     arg_spec=("args", "rets", "attrs.scale"),
-    workspaces=(jax_tvm_ffi.Workspace(workspace_size),),
 )
 result = jax.jit(lambda x: call(x, scale=scale))(input)
 ```
@@ -193,11 +192,12 @@ its embedded device code, such as a CUBIN, plus the explicit
 available for other serialized formats through a registered loader with
 signature `(Bytes) -> Module`.
 
-Workspaces are trailing `uint8` outputs owned by XLA. They are hidden from the
-Python result and passed to the loaded function as opaque pointers after its
-ordinary input and output tensors. This is separate from
-`use_last_output_for_alloc_workspace`, which provides TVM FFI's allocation
-arena and does not pass the arena itself to the function.
+Kernels that need scratch storage can take an ordinary tensor output. Include
+its shape and dtype in `result_shape_dtypes`; XLA allocates the buffer, and
+`arg_spec` passes it with the other `rets` as a TVM-FFI tensor. A Python wrapper
+can discard that result. To reuse a JAX input buffer as writable scratch,
+declare a matching output and map the input to it with `input_output_aliases`.
+Write through the output tensor; unaliased input arrays must remain unmodified.
 
 #### Loading in a fresh process
 

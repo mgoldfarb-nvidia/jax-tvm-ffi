@@ -24,31 +24,32 @@ from jax.experimental import serialize_executable
 _PAYLOAD_CUDA_SOURCE = r"""
     #include <cuda_runtime.h>
 
-    __global__ void add_kernel(const float* x, float* y, float* workspace,
+    __global__ void add_kernel(const float* x, float* y, float* scratch,
                                int64_t n, float increment) {
       int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
       if (i < n) {
-        workspace[i] = x[i] + increment;
-        y[i] = workspace[i];
+        scratch[i] = x[i] + increment;
+        y[i] = scratch[i];
       }
     }
 
     void add(tvm::ffi::Any increment, tvm::ffi::TensorView y,
-             tvm::ffi::TensorView x, int64_t stream, void* workspace) {
-      TVM_FFI_ICHECK(workspace != nullptr);
+             tvm::ffi::TensorView scratch, tvm::ffi::TensorView x, int64_t stream) {
       TVM_FFI_ICHECK(stream != 0);
       TVM_FFI_ICHECK_EQ(x.ndim(), 1);
       TVM_FFI_ICHECK_EQ(x.shape()[0], y.shape()[0]);
+      TVM_FFI_ICHECK_EQ(scratch.ndim(), 1);
+      TVM_FFI_ICHECK_EQ(x.shape()[0], scratch.shape()[0]);
       int64_t n = x.shape()[0];
       add_kernel<<<(n + 255) / 256, 256, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
           static_cast<const float*>(x.data_ptr()), static_cast<float*>(y.data_ptr()),
-          static_cast<float*>(workspace), n, increment.cast<int64_t>());
+          static_cast<float*>(scratch.data_ptr()), n, increment.cast<int64_t>());
       TVM_FFI_ICHECK_EQ(cudaGetLastError(), cudaSuccess);
     }
 
     void subtract(tvm::ffi::Any decrement, tvm::ffi::TensorView y,
-                  tvm::ffi::TensorView x, int64_t stream, void* workspace) {
-      add(-decrement.cast<int64_t>(), y, x, stream, workspace);
+                  tvm::ffi::TensorView scratch, tvm::ffi::TensorView x, int64_t stream) {
+      add(-decrement.cast<int64_t>(), y, scratch, x, stream);
     }
 
     void capture_status(tvm::ffi::TensorView output, int64_t stream) {
@@ -172,9 +173,7 @@ def object_bytes(tmp_path_factory, cuda_runtime):
 
 
 @requires_gpu
-def test_payload_call_loads_once_per_instantiation_and_passes_workspace(
-    payload_target, payload_module, request
-):
+def test_payload_call_loads_once_per_instantiation(payload_target, payload_module, request):
     payload = b"payload-module"
     loader_name = "jax_tvm_ffi_test.LoadPayloadModule"
     load_count = 0
@@ -191,29 +190,28 @@ def test_payload_call_loads_once_per_instantiation_and_passes_workspace(
 
     request.addfinalizer(restore_loader)
 
+    result = jax.ShapeDtypeStruct((8,), jnp.float32)
     call = jax_tvm_ffi.ffi_call_from_payload(
         payload,
         loader_name,
         "add",
-        jax.ShapeDtypeStruct((8,), jnp.float32),
+        (result, result),
         platform="gpu",
         arg_spec=("attrs.increment", "rets", "args", "ctx.stream"),
-        workspaces=(jax_tvm_ffi.Workspace(64),),
         vmap_method="broadcast_all",
     )
-    add_two = jax.jit(lambda value: call(value, increment=2))
-    add_three = jax.jit(lambda value: call(value, increment=3))
+    add_two = jax.jit(lambda value: call(value, increment=2)[0])
+    add_three = jax.jit(lambda value: call(value, increment=3)[0])
     subtract_call = jax_tvm_ffi.ffi_call_from_payload(
         payload,
         loader_name,
         "subtract",
-        jax.ShapeDtypeStruct((8,), jnp.float32),
+        (result, result),
         platform="gpu",
         arg_spec=("attrs.decrement", "rets", "args", "ctx.stream"),
-        workspaces=(jax_tvm_ffi.Workspace(64),),
         vmap_method="broadcast_all",
     )
-    subtract_two = jax.jit(lambda value: subtract_call(value, decrement=2))
+    subtract_two = jax.jit(lambda value: subtract_call(value, decrement=2)[0])
     x = jnp.arange(8, device=jax.devices("gpu")[0], dtype=jnp.float32)
 
     stablehlo = str(add_two.lower(x).compiler_ir())
@@ -236,7 +234,7 @@ def test_payload_call_loads_once_per_instantiation_and_passes_workspace(
         assert bytes(payload_bytes) == payload
         return payload_module
 
-    add_five = jax.jit(lambda value: call(value, increment=5))
+    add_five = jax.jit(lambda value: call(value, increment=5)[0])
     numpy.testing.assert_equal(numpy.asarray(add_five(x)), numpy.asarray(x + 5))
     numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
     assert replacement_load_count == 1
@@ -244,19 +242,25 @@ def test_payload_call_loads_once_per_instantiation_and_passes_workspace(
 
 
 @requires_gpu
-def test_object_call_loads_orcjit_object(payload_target, object_bytes):
+@pytest.mark.parametrize("reuse_input", [False, True])
+def test_object_call_loads_orcjit_object(payload_target, object_bytes, reuse_input):
+    result = jax.ShapeDtypeStruct((8,), jnp.float32)
     call = jax_tvm_ffi.ffi_call_from_object(
         object_bytes,
         "add",
-        jax.ShapeDtypeStruct((8,), jnp.float32),
+        (result, result),
         platform="gpu",
         arg_spec=("attrs.increment", "rets", "args", "ctx.stream"),
-        workspaces=(jax_tvm_ffi.Workspace(64),),
+        input_output_aliases={0: 1} if reuse_input else {},
     )
+    input_values = numpy.arange(8, dtype=numpy.float32)
     x = jnp.arange(8, device=jax.devices("gpu")[0], dtype=jnp.float32)
 
     add_two = jax.jit(lambda value: call(value, increment=2))
-    numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
+    y, scratch = add_two(x)
+    numpy.testing.assert_equal(numpy.asarray(y), input_values + 2)
+    numpy.testing.assert_equal(numpy.asarray(scratch), input_values + 2)
+    numpy.testing.assert_equal(numpy.asarray(x), input_values)
 
 
 @requires_gpu
@@ -302,12 +306,12 @@ def test_payload_cuda_graph_is_opt_in(payload_target, payload_module, request, a
 def test_object_round_trip_in_fresh_process(
     payload_target, object_bytes, cuda_runtime, tmp_path, artifact_format, allow_cuda_graph
 ):
+    result = jax.ShapeDtypeStruct((8,), jnp.float32)
     call = jax_tvm_ffi.ffi_call_from_serialized(
         jax_tvm_ffi.SerializedFunction(object_bytes, "add"),
-        jax.ShapeDtypeStruct((8,), jnp.float32),
+        (result, result),
         platform="gpu",
         arg_spec=("attrs.increment", "rets", "args", "ctx.stream"),
-        workspaces=(jax_tvm_ffi.Workspace(64),),
         allow_cuda_graph=allow_cuda_graph,
     )
     input_spec = jax.ShapeDtypeStruct(
@@ -355,7 +359,9 @@ else:
         *pickle.loads(artifact), backend="gpu", execution_devices=[jax.devices("gpu")[0]]
     )
 x = jnp.arange(8, device=jax.devices("gpu")[0], dtype=jnp.float32)
-numpy.testing.assert_equal(numpy.asarray(compiled(x)), numpy.asarray(x + 2))
+y, scratch = compiled(x)
+numpy.testing.assert_equal(numpy.asarray(y), numpy.asarray(x + 2))
+numpy.testing.assert_equal(numpy.asarray(scratch), numpy.asarray(x + 2))
 """
     environment = os.environ.copy()
     environment["JAX_PLATFORMS"] = "cuda"
@@ -390,13 +396,16 @@ def test_object_entry_points_own_independent_modules(payload_target, object_byte
     call_options = {
         "platform": "gpu",
         "arg_spec": ("attrs.increment", "rets", "args", "ctx.stream"),
-        "workspaces": (jax_tvm_ffi.Workspace(64),),
     }
-    object_call = jax_tvm_ffi.ffi_call_from_object(object_bytes, "add", result, **call_options)
-    serialized_call = jax_tvm_ffi.ffi_call_from_serialized(serialized, result, **call_options)
+    object_call = jax_tvm_ffi.ffi_call_from_object(
+        object_bytes, "add", (result, result), **call_options
+    )
+    serialized_call = jax_tvm_ffi.ffi_call_from_serialized(
+        serialized, (result, result), **call_options
+    )
     x = jnp.arange(8, device=jax.devices("gpu")[0], dtype=jnp.float32)
-    add_one = jax.jit(lambda value: object_call(value, increment=1)).lower(x).compile()
-    add_two = jax.jit(lambda value: serialized_call(value, increment=2)).lower(x).compile()
+    add_one = jax.jit(lambda value: object_call(value, increment=1)[0]).lower(x).compile()
+    add_two = jax.jit(lambda value: serialized_call(value, increment=2)[0]).lower(x).compile()
 
     numpy.testing.assert_equal(numpy.asarray(add_one(x)), numpy.asarray(x + 1))
     numpy.testing.assert_equal(numpy.asarray(add_two(x)), numpy.asarray(x + 2))
@@ -436,8 +445,3 @@ def test_payload_call_rejects_missing_export(payload_target, payload_module, req
     with pytest.raises(Exception, match="does not export TVM FFI function 'missing'") as error:
         jax.jit(call)(jnp.arange(8, device=jax.devices("gpu")[0], dtype=jnp.float32))
     assert "INVALID_ARGUMENT" in str(error.value)
-
-
-def test_workspace_rejects_nonpositive_size():
-    with numpy.testing.assert_raises_regex(ValueError, "must be positive"):
-        jax_tvm_ffi.Workspace(0)
